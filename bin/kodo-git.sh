@@ -188,8 +188,9 @@ _glab_release_edit() {
 # Returns: path to the cloned directory on stdout
 _gh_repo_clone() {
     local slug="$1" branch="${2:-}"
-    local work_dir="$KODO_HOME/.workdir/${slug//\//-}-$$"
-    mkdir -p "$work_dir"
+    mkdir -p "$KODO_HOME/.workdir"
+    local work_dir
+    work_dir=$(mktemp -d "$KODO_HOME/.workdir/${slug//\//-}-XXXXXX") || return 1
 
     local clone_args=(--depth 50 --single-branch)
     if [[ -n "$branch" ]]; then
@@ -270,7 +271,6 @@ main() {
     # Local operations that don't need a repo TOML — handle before provider dispatch
     case "$action" in
         branch-create)  shift; _gh_branch_create "$@"; return $? ;;
-        branch-push)    shift; _gh_branch_push "$@"; return $? ;;
         cleanup-workdir) shift; _cleanup_workdir "$@"; return $? ;;
     esac
 
@@ -327,6 +327,7 @@ main() {
                 repo-clone)         _gh_repo_clone "$slug" "$@" ;;
                 pr-create)          _gh_pr_create "$slug" "$@" ;;
                 issue-get)          _gh_issue_get "$slug" "$@" ;;
+                branch-push)        _gh_branch_push "$@" ;;
                 *) kodo_log "ERROR: unknown action '$action'"; exit 1 ;;
             esac
             ;;

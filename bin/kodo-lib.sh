@@ -386,7 +386,8 @@ kodo_invoke_llm() {
                     --json-schema "$schema_content" \
                     --output-format json \
                     --max-turns "$max_turns" 2>"$llm_stderr_file") || {
-                    _llm_log_fail "$cli" "$repo" "$domain" "exit=$? $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
+                    local exit_code=$?
+                    _llm_log_fail "$cli" "$repo" "$domain" "exit=$exit_code $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
                     rm -f "$llm_stderr_file"; return 1
                 }
                 result=$(echo "$raw_output" | jq -c '.structured_output // empty' 2>/dev/null)
@@ -398,7 +399,8 @@ kodo_invoke_llm() {
                 raw_output=$(timeout "$timeout_s" claude -p "$prompt" \
                     --output-format json \
                     --max-turns "$max_turns" 2>"$llm_stderr_file") || {
-                    _llm_log_fail "$cli" "$repo" "$domain" "exit=$? $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
+                    local exit_code=$?
+                    _llm_log_fail "$cli" "$repo" "$domain" "exit=$exit_code $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
                     rm -f "$llm_stderr_file"; return 1
                 }
                 local text_result
@@ -418,7 +420,8 @@ CRITICAL INSTRUCTION: Respond with ONLY a raw JSON object. No markdown, no code 
 ${schema_content}"
             fi
             raw_output=$(timeout "$timeout_s" "$cli" -p "$structured_prompt" 2>"$llm_stderr_file") || {
-                _llm_log_fail "$cli" "$repo" "$domain" "exit=$? $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
+                local exit_code=$?
+                _llm_log_fail "$cli" "$repo" "$domain" "exit=$exit_code $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
                 rm -f "$llm_stderr_file"; return 1
             }
             result=$(_extract_json "$raw_output") || {
@@ -434,7 +437,8 @@ ${schema_content}"
 Respond with ONLY valid JSON matching this schema: ${schema_content}"
             fi
             raw_output=$(timeout "$timeout_s" codex exec "$structured_prompt" 2>"$llm_stderr_file") || {
-                _llm_log_fail "$cli" "$repo" "$domain" "exit=$? $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
+                local exit_code=$?
+                _llm_log_fail "$cli" "$repo" "$domain" "exit=$exit_code $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
                 rm -f "$llm_stderr_file"; return 1
             }
             result=$(_extract_json "$raw_output") || {

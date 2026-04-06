@@ -107,6 +107,7 @@ scan_milestones() {
     local toml="$1" repo_id="$2"
     local milestones
     milestones=$("$SCRIPT_DIR/kodo-git.sh" milestone-list "$toml" 2>/dev/null) || return 0
+    [[ -z "$milestones" ]] && return 0
 
     echo "$milestones" | jq -c 'if type == "array" then .[] else . end' 2>/dev/null | while IFS= read -r ms; do
         local ms_num
