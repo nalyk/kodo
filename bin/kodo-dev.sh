@@ -51,6 +51,18 @@ transition() {
     "$SCRIPT_DIR/kodo-transition.sh" "$EVENT_ID" "$1" "$2" "dev"
 }
 
+# Get PR number: pipeline metadata first (issue-driven), then payload (PR-driven)
+_get_pr_num() {
+    local num
+    num=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_number")
+    if [[ -z "$num" || "$num" == "null" ]]; then
+        local payload
+        payload="$(get_payload)"
+        num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+    fi
+    echo "$num"
+}
+
 defer() {
     local reason="$1"
     transition "$(get_state)" "deferred"
@@ -435,13 +447,8 @@ do_hard_gates() {
     max_diff="$(kodo_toml_get "$REPO_TOML" "max_diff_lines")"
     max_diff="${max_diff:-500}"
 
-    local payload pr_num
-    payload="$(get_payload)"
-    # Use generated PR number if available (issue-driven events)
-    pr_num=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_number")
-    if [[ -z "$pr_num" || "$pr_num" == "null" ]]; then
-        pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
-    fi
+    local pr_num
+    pr_num=$(_get_pr_num)
 
     local gate_failed=""
 
@@ -473,13 +480,7 @@ do_auditing() {
 
     local payload pr_num
     payload="$(get_payload)"
-
-    # For issue-driven events, the PR was created by do_generating — read from metadata
-    pr_num=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_number")
-    if [[ -z "$pr_num" || "$pr_num" == "null" ]]; then
-        # Fallback: original payload PR number (PullRequestEvent path)
-        pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
-    fi
+    pr_num=$(_get_pr_num)
 
     local confidence=0
     local review_output=""
@@ -803,12 +804,7 @@ do_auto_merge() {
     kodo_log "DEV: auto-merging $EVENT_ID"
 
     local pr_num
-    pr_num=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_number")
-    if [[ -z "$pr_num" || "$pr_num" == "null" ]]; then
-        local payload
-        payload="$(get_payload)"
-        pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
-    fi
+    pr_num=$(_get_pr_num)
 
     if [[ -z "$pr_num" ]]; then
         defer "no PR number for merge"
@@ -841,12 +837,7 @@ do_guarded_merge() {
     kodo_log "DEV: guarded merge $EVENT_ID (48h CI window)"
 
     local pr_num
-    pr_num=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_number")
-    if [[ -z "$pr_num" || "$pr_num" == "null" ]]; then
-        local payload
-        payload="$(get_payload)"
-        pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
-    fi
+    pr_num=$(_get_pr_num)
 
     if [[ -z "$pr_num" ]]; then
         defer "no PR number for guarded merge"
