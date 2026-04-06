@@ -32,7 +32,7 @@ _guard_write() {
     local toml="$1" action="$2"
     if kodo_is_shadow "$toml"; then
         kodo_log "SHADOW BLOCK: $action on $(kodo_repo_id "$toml") — log only"
-        return 1
+        return 3  # distinct code: 3 = shadow blocked (not error)
     fi
     return 0
 }
@@ -60,7 +60,12 @@ _gh_pr_merge() {
 # gh pr checks uses: state = PENDING | SUCCESS | FAILURE | CANCELLED | ERROR | EXPECTED | NEUTRAL | STALE | SKIPPED
 _gh_pr_checks() {
     local slug="$1" pr_num="$2"
-    gh pr checks "$pr_num" --repo "$slug" --json name,state,bucket 2>/dev/null | jq -c '{
+    local raw
+    raw=$(gh pr checks "$pr_num" --repo "$slug" --json name,state,bucket 2>&1) || {
+        kodo_log "ERROR: gh pr checks failed for $slug #$pr_num: ${raw:0:200}"
+        return 1
+    }
+    echo "$raw" | jq -c '{
         total: length,
         pass: [.[] | select(.bucket == "pass")] | length,
         fail: [.[] | select(.bucket == "fail")] | length,
@@ -139,7 +144,7 @@ _gh_compare() {
 
 _glab_pr_list() {
     local slug="$1"
-    glab mr list --repo "$slug" --output json 2>/dev/null || echo "[]"
+    glab mr list --repo "$slug" --output json 2>/dev/null || { kodo_log "ERROR: glab mr list failed for $slug"; return 1; }
 }
 
 _glab_pr_comment() {
@@ -154,7 +159,7 @@ _glab_pr_merge() {
 
 _glab_issue_list() {
     local slug="$1"
-    glab issue list --repo "$slug" --output json 2>/dev/null || echo "[]"
+    glab issue list --repo "$slug" --output json 2>/dev/null || { kodo_log "ERROR: glab issue list failed for $slug"; return 1; }
 }
 
 _glab_issue_comment() {
@@ -174,7 +179,7 @@ _glab_issue_label() {
 
 _glab_release_get() {
     local slug="$1" tag="$2"
-    glab release view "$tag" --repo "$slug" --output json 2>/dev/null || echo "{}"
+    glab release view "$tag" --repo "$slug" --output json 2>/dev/null || { kodo_log "ERROR: glab release view failed for $slug $tag"; return 1; }
 }
 
 _glab_release_edit() {
@@ -209,9 +214,7 @@ _gh_repo_clone() {
 # Create a branch in a local clone and push it
 _gh_branch_create() {
     local work_dir="$1" branch_name="$2"
-    cd "$work_dir" || return 1
-    git checkout -b "$branch_name" 2>/dev/null
-    cd - >/dev/null
+    ( cd "$work_dir" && git checkout -b "$branch_name" )
 }
 
 # Create a PR from a branch
@@ -223,10 +226,7 @@ _gh_pr_create() {
 # Push a branch from a working directory
 _gh_branch_push() {
     local work_dir="$1" branch_name="$2"
-    cd "$work_dir" || return 1
-    # --force-with-lease: safe force push — allows retry when branch exists from prior run
-    git push --force-with-lease origin "$branch_name" 2>/dev/null
-    cd - >/dev/null
+    ( cd "$work_dir" && git push --force-with-lease origin "$branch_name" )
 }
 
 # Clean up a working directory
@@ -300,9 +300,7 @@ main() {
     # Write actions require shadow mode check
     local write_actions="pr-comment pr-merge pr-create branch-push issue-comment issue-close issue-label release-edit discussion-create"
     if [[ " $write_actions " == *" $action "* ]]; then
-        if ! _guard_write "$toml" "$action"; then
-            return 0
-        fi
+        _guard_write "$toml" "$action" || return $?
     fi
 
     case "$provider" in

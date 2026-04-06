@@ -30,9 +30,10 @@ export KODO_TRANSITION_REPO="$REPO_ID"
 if ! kodo_claim_event "$EVENT_ID" "dev"; then
     exit 0
 fi
-# Release lock + cleanup workdir on any exit (normal, error, signal)
+# Release lock + cleanup workdir + temp files on any exit (normal, error, signal)
 _KODO_WORKDIR_CLEANUP=""
-trap 'kodo_release_event "$EVENT_ID" "dev"; [[ -n "$_KODO_WORKDIR_CLEANUP" ]] && "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$_KODO_WORKDIR_CLEANUP" 2>/dev/null' EXIT
+_KODO_TMPFILES=()
+trap 'kodo_release_event "$EVENT_ID" "dev"; [[ -n "$_KODO_WORKDIR_CLEANUP" ]] && "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$_KODO_WORKDIR_CLEANUP" 2>/dev/null; for _f in "${_KODO_TMPFILES[@]}"; do rm -rf "$_f" 2>/dev/null; done' EXIT
 
 # ── State Reader ─────────────────────────────────────────────
 
@@ -245,13 +246,25 @@ Instructions:
 
 Do NOT commit. Just make the file changes.")"
 
+        # Budget check before expensive Claude invocation
+        if ! kodo_check_budget "claude"; then
+            defer "claude budget exhausted"
+            return
+        fi
+
         # Run Claude from within the cloned repo directory
         # --allowedTools grants headless file write permission (without it, claude -p refuses writes)
+        local gen_stderr
+        gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
         fix_result=$(cd "$work_dir" && timeout 600 claude -p "$prompt" \
             --output-format json \
             --max-turns 20 \
             --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(git diff:*)" "Bash(git status:*)" "Bash(git log:*)" "Bash(ls:*)" "Bash(find:*)" \
-            2>/dev/null) || fix_result=""
+            2>"$gen_stderr") || {
+            kodo_log "DEV: claude code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
+            fix_result=""
+        }
+        rm -f "$gen_stderr"
 
         if [[ -n "$fix_result" ]]; then
             local cost
@@ -265,22 +278,43 @@ Do NOT commit. Just make the file changes.")"
     elif [[ "$gen_cli" == "codex" ]]; then
         kodo_log "DEV: running codex in $work_dir for issue #$issue_num"
 
+        local gen_stderr
+        gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
         fix_result=$(cd "$work_dir" && timeout 600 codex exec \
-            "Fix issue #$issue_num: $issue_title. $issue_body. Make minimal changes only." 2>/dev/null) || fix_result=""
-        kodo_log_budget "codex" "$REPO_ID" "dev" 0 0 0.50
+            "Fix issue #$issue_num: $issue_title. $issue_body. Make minimal changes only." 2>"$gen_stderr") || {
+            kodo_log "DEV: codex code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
+            fix_result=""
+        }
+        rm -f "$gen_stderr"
+        if [[ -n "$fix_result" ]]; then
+            kodo_log_budget "codex" "$REPO_ID" "dev" 0 0 0.50
+        fi
     fi
 
     # Step 5: Check if any files were actually changed
-    local changed_files
-    changed_files=$(cd "$work_dir" && git diff --name-only 2>/dev/null && git ls-files --others --exclude-standard 2>/dev/null)
+    local tracked_changes untracked_files changed_files
+    tracked_changes=$(cd "$work_dir" && git diff --name-only 2>/dev/null) || tracked_changes=""
+    untracked_files=$(cd "$work_dir" && git ls-files --others --exclude-standard 2>/dev/null) || untracked_files=""
+    changed_files="${tracked_changes}${tracked_changes:+$'\n'}${untracked_files}"
+    changed_files="${changed_files#$'\n'}"
 
     if [[ -z "$changed_files" ]]; then
         # Check if Claude determined the issue is already fixed
-        local result_text=""
+        # NOTE: this parses free-text LLM output — a structured schema would be better
+        # but Claude's --allowedTools mode doesn't support --json-schema simultaneously
+        local result_text="" already_resolved=false
         if [[ -n "$fix_result" ]]; then
             result_text=$(echo "$fix_result" | jq -r '.result // ""' 2>/dev/null)
+            # Only match if the text explicitly and unambiguously says "already fixed/resolved"
+            # Require "already" or "no longer" at word boundary, not in negated context
+            if echo "$result_text" | grep -cEi "already (been )?(fix|resolv|implement|address)|no longer (valid|applic|reproduc)" | grep -q '^[1-9]'; then
+                # Double-check: reject if negation precedes the match
+                if ! echo "$result_text" | grep -qiE "(not|isn.t|hasn.t|hasn.t been) already"; then
+                    already_resolved=true
+                fi
+            fi
         fi
-        if echo "$result_text" | grep -qiE "already.*(fix|resolv|implement)|no longer.*(valid|applic)|nu mai este valabil|deja.*(fix|rezolv)|not.*(reproducib|valid)"; then
+        if [[ "$already_resolved" == "true" ]]; then
             kodo_log "DEV: issue #$issue_num appears already resolved — commenting and closing"
             # Post comment on GitHub explaining the finding
             "$SCRIPT_DIR/kodo-git.sh" issue-comment "$REPO_TOML" "$issue_num" \
@@ -312,6 +346,8 @@ _Automated analysis by KŌDŌ | Event: $EVENT_ID | Model: ${gen_cli}_" 2>/dev/nu
     kodo_pipeline_set "$EVENT_ID" "dev" "gen_cli" "$gen_cli"
 
     # Step 6: Commit the changes
+    local git_stderr
+    git_stderr=$(mktemp); _KODO_TMPFILES+=("$git_stderr")
     (
         cd "$work_dir" || exit 1
         git add -A
@@ -322,11 +358,14 @@ Event-ID: $EVENT_ID
 Model: $gen_cli
 COMMITMSG
         )" --no-verify
-    ) 2>/dev/null || {
+    ) 2>"$git_stderr" || {
+        kodo_log "DEV: git commit failed: $(head -c 300 "$git_stderr" 2>/dev/null)"
+        rm -f "$git_stderr"
         "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
         defer "git commit failed"
         return
     }
+    rm -f "$git_stderr"
 
     # Step 7: Push branch + create PR (shadow mode blocks via kodo-git.sh)
     "$SCRIPT_DIR/kodo-git.sh" branch-push "$REPO_TOML" "$work_dir" "$branch_name" 2>/dev/null || {
@@ -468,7 +507,11 @@ Score confidence 0-100 for merge safety. Identify risks and behavioral changes."
             --repo "$REPO_ID" \
             --domain "dev") || codex_result=""
         if [[ -n "$codex_result" ]]; then
-            confidence=$(echo "$codex_result" | jq -r '.score // 70' 2>/dev/null)
+            confidence=$(echo "$codex_result" | jq -r '.score // 0' 2>/dev/null)
+            if ! [[ "$confidence" =~ ^[0-9]+$ ]]; then
+                kodo_log "DEV: codex returned non-numeric score: $confidence"
+                confidence=0
+            fi
             [[ "$confidence" -gt 79 ]] && confidence=79
             review_output="$codex_result"
         else
@@ -535,7 +578,7 @@ do_scanning() {
 
     # Security scan: semgrep on diff if available
     local scan_clean=true
-    local scan_findings=""
+    local scan_findings=0
 
     if command -v semgrep >/dev/null 2>&1; then
         local payload pr_num
@@ -617,7 +660,7 @@ Review the change for correctness, security, and safety. Cast your vote.")"
 
     # Collect structured votes in PARALLEL — all 3 CLIs run concurrently
     local vote_dir
-    vote_dir=$(mktemp -d)
+    vote_dir=$(mktemp -d); _KODO_TMPFILES+=("$vote_dir")
 
     _cast_ballot() {
         local cli="$1" outfile="$vote_dir/$cli.json"
@@ -696,7 +739,10 @@ _check_ci_and_merge() {
 
     # Check CI status via kodo-git.sh
     local ci_status
-    ci_status=$("$SCRIPT_DIR/kodo-git.sh" pr-checks "$REPO_TOML" "$pr_num" 2>/dev/null) || ci_status=""
+    ci_status=$("$SCRIPT_DIR/kodo-git.sh" pr-checks "$REPO_TOML" "$pr_num" 2>&1) || {
+        kodo_log "DEV: CI check API failed for PR #$pr_num — yielding (will not merge without CI)"
+        return 1
+    }
 
     if [[ -n "$ci_status" ]]; then
         local ci_state ci_pass ci_fail ci_pending ci_total
@@ -792,7 +838,7 @@ do_guarded_merge() {
         WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND domain = 'dev';")
     if [[ -n "$created_at" ]]; then
         local age_hours
-        age_hours=$(kodo_sql "SELECT CAST((julianday('now') - julianday('$created_at')) * 24 AS INTEGER);")
+        age_hours=$(kodo_sql "SELECT CAST((julianday('now') - julianday('$(kodo_sql_escape "$created_at")')) * 24 AS INTEGER);")
         if [[ "$age_hours" -gt 48 ]]; then
             defer "guarded merge timeout: $age_hours hours > 48h window"
             return

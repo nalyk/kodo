@@ -46,7 +46,7 @@ _insert_event() {
 scan_pull_requests() {
     local toml="$1" repo_id="$2"
     local prs
-    prs=$("$SCRIPT_DIR/kodo-git.sh" pr-list "$toml" 2>/dev/null) || return 0
+    prs=$("$SCRIPT_DIR/kodo-git.sh" pr-list "$toml" 2>/dev/null) || { kodo_log "SCOUT: pr-list failed for $repo_id"; return 0; }
 
     echo "$prs" | jq -c '.[]' 2>/dev/null | while IFS= read -r pr; do
         local pr_num pr_state
@@ -67,7 +67,7 @@ scan_pull_requests() {
 scan_issues() {
     local toml="$1" repo_id="$2"
     local issues
-    issues=$("$SCRIPT_DIR/kodo-git.sh" issue-list "$toml" 2>/dev/null) || return 0
+    issues=$("$SCRIPT_DIR/kodo-git.sh" issue-list "$toml" 2>/dev/null) || { kodo_log "SCOUT: issue-list failed for $repo_id"; return 0; }
 
     echo "$issues" | jq -c '.[]' 2>/dev/null | while IFS= read -r issue; do
         local issue_num issue_state
@@ -88,7 +88,7 @@ scan_issues() {
 scan_releases() {
     local toml="$1" repo_id="$2"
     local releases
-    releases=$("$SCRIPT_DIR/kodo-git.sh" release-list "$toml" 2>/dev/null) || return 0
+    releases=$("$SCRIPT_DIR/kodo-git.sh" release-list "$toml" 2>/dev/null) || { kodo_log "SCOUT: release-list failed for $repo_id"; return 0; }
 
     echo "$releases" | jq -c '.[]' 2>/dev/null | head -5 | while IFS= read -r rel; do
         local tag
@@ -106,7 +106,7 @@ scan_releases() {
 scan_milestones() {
     local toml="$1" repo_id="$2"
     local milestones
-    milestones=$("$SCRIPT_DIR/kodo-git.sh" milestone-list "$toml" 2>/dev/null) || return 0
+    milestones=$("$SCRIPT_DIR/kodo-git.sh" milestone-list "$toml" 2>/dev/null) || { kodo_log "SCOUT: milestone-list failed for $repo_id"; return 0; }
     [[ -z "$milestones" ]] && return 0
 
     echo "$milestones" | jq -c 'if type == "array" then .[] else . end' 2>/dev/null | while IFS= read -r ms; do
@@ -140,10 +140,12 @@ main() {
         repo_id="$(kodo_repo_id "$toml")"
         toml_count=$((toml_count + 1))
 
-        local dev_enabled mkt_enabled pm_enabled
-        dev_enabled=$(kodo_toml_bool "$toml" "enabled" && echo "1" || echo "0")
+        # Skip disabled repos
+        if ! kodo_toml_bool "$toml" "enabled" 2>/dev/null; then
+            kodo_log "SCOUT: $repo_id disabled — skipping"
+            continue
+        fi
 
-        # Scan based on enabled engines
         scan_pull_requests "$toml" "$repo_id"
         scan_issues "$toml" "$repo_id"
         scan_releases "$toml" "$repo_id"

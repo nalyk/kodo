@@ -15,7 +15,10 @@ kodo_init_db() {
         mkdir -p "$(dirname "$KODO_DB")"
         sqlite3 "$KODO_DB" < "$KODO_HOME/sql/schema.sql"
     fi
-    sqlite3 "$KODO_DB" "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;" >/dev/null 2>&1
+    local pragma_out
+    pragma_out=$(sqlite3 "$KODO_DB" "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;" 2>&1) || {
+        kodo_log "WARNING: DB pragma failed: $pragma_out"
+    }
 }
 
 # SQLite wrapper with busy timeout (5s wait on lock instead of instant fail)
@@ -91,6 +94,11 @@ kodo_check_budget() {
     fi
     local spent
     spent=$(kodo_get_spend "$model")
+    # Validate numeric before awk arithmetic
+    if ! [[ "$spent" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+        kodo_log "BUDGET: invalid spend value for $model: $spent — blocking"
+        return 1
+    fi
     # Alert at 80%
     local threshold
     threshold=$(awk "BEGIN { printf \"%.2f\", $limit * 0.80 }")
@@ -128,10 +136,15 @@ kodo_send_telegram() {
     token="$(kodo_toml_get "$KODO_HOME/telegram.conf" "bot_token" 2>/dev/null)"
     chat_id="$(kodo_toml_get "$KODO_HOME/telegram.conf" "chat_id" 2>/dev/null)"
     if [[ -n "$token" && -n "$chat_id" ]]; then
-        curl -s -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+        local http_code
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            "https://api.telegram.org/bot${token}/sendMessage" \
             -d chat_id="$chat_id" \
             -d text="$msg" \
-            -d parse_mode="Markdown" >/dev/null 2>&1
+            -d parse_mode="Markdown" 2>/dev/null) || http_code="000"
+        if [[ "$http_code" != "200" ]]; then
+            kodo_log "TELEGRAM: send failed (HTTP $http_code) — ${msg:0:80}"
+        fi
     fi
 }
 
@@ -205,44 +218,49 @@ kodo_claim_event() {
     eid="$(kodo_sql_escape "$event_id")"
     dom="$(kodo_sql_escape "$domain")"
 
-    # Atomic claim: only succeed if processing_pid is NULL or stale
-    # First, clear stale PIDs (process no longer running)
+    # Atomic claim: UPDATE + changes() in single sqlite3 invocation
+    # (changes() only works within the same connection)
+    # Step 1: try claiming NULL/self pid (common case, no race)
+    local rows_changed
+    rows_changed=$(sqlite3 -cmd ".timeout 5000" "$KODO_DB" "
+        UPDATE pipeline_state
+        SET processing_pid = ${my_pid}, updated_at = datetime('now')
+        WHERE event_id = '${eid}' AND domain = '${dom}'
+        AND (processing_pid IS NULL OR processing_pid = ${my_pid});
+        SELECT changes();")
+
+    if [[ "${rows_changed:-0}" -gt 0 ]]; then
+        kodo_log "LOCK: $event_id [$domain] claimed by PID $my_pid"
+        return 0
+    fi
+
+    # Step 2: someone else holds it — check if alive
     local current_pid
     current_pid=$(kodo_sql "SELECT processing_pid FROM pipeline_state
         WHERE event_id = '${eid}' AND domain = '${dom}';")
 
-    if [[ -n "$current_pid" && "$current_pid" != "NULL" && "$current_pid" != "" ]]; then
-        if [[ "$current_pid" == "$my_pid" ]]; then
-            # Already own it — re-entrant claim is fine
-            return 0
-        elif kill -0 "$current_pid" 2>/dev/null; then
-            # Another live process owns it
+    if [[ -n "$current_pid" && "$current_pid" != "NULL" ]]; then
+        if kill -0 "$current_pid" 2>/dev/null; then
             kodo_log "LOCK: $event_id [$domain] owned by PID $current_pid (alive) — skipping"
             return 1
-        else
-            kodo_log "LOCK: $event_id [$domain] stale PID $current_pid (dead) — reclaiming"
+        fi
+        # Dead PID — reclaim atomically (single connection)
+        kodo_log "LOCK: $event_id [$domain] stale PID $current_pid (dead) — reclaiming"
+        rows_changed=$(sqlite3 -cmd ".timeout 5000" "$KODO_DB" "
+            UPDATE pipeline_state
+            SET processing_pid = ${my_pid}, updated_at = datetime('now')
+            WHERE event_id = '${eid}' AND domain = '${dom}'
+            AND processing_pid = '$(kodo_sql_escape "$current_pid")';
+            SELECT changes();")
+
+        if [[ "${rows_changed:-0}" -gt 0 ]]; then
+            kodo_log "LOCK: $event_id [$domain] reclaimed by PID $my_pid"
+            return 0
         fi
     fi
 
-    # Claim with atomic UPDATE (WHERE processing_pid IS NULL OR stale)
-    kodo_sql "UPDATE pipeline_state
-        SET processing_pid = ${my_pid}, updated_at = datetime('now')
-        WHERE event_id = '${eid}' AND domain = '${dom}'
-        AND (processing_pid IS NULL OR processing_pid = ${my_pid}
-             OR NOT EXISTS (SELECT 1 FROM (SELECT ${current_pid:-0} AS pid) WHERE pid > 0));"
-
-    # Verify we got the claim
-    local claimed_pid
-    claimed_pid=$(kodo_sql "SELECT processing_pid FROM pipeline_state
-        WHERE event_id = '${eid}' AND domain = '${dom}';")
-
-    if [[ "$claimed_pid" == "$my_pid" ]]; then
-        kodo_log "LOCK: $event_id [$domain] claimed by PID $my_pid"
-        return 0
-    else
-        kodo_log "LOCK: $event_id [$domain] claim race lost to PID $claimed_pid"
-        return 1
-    fi
+    kodo_log "LOCK: $event_id [$domain] claim failed"
+    return 1
 }
 
 # Release an event after processing
@@ -478,6 +496,11 @@ _llm_log_fail() {
 
 kodo_pipeline_set() {
     local event_id="$1" domain="$2" key="$3" value="$4"
+    # Validate key is a safe identifier (prevents SQL/JSON path injection)
+    if [[ ! "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        kodo_log "ERROR: invalid pipeline metadata key: $key"
+        return 1
+    fi
     local eid dom
     eid="$(kodo_sql_escape "$event_id")"
     dom="$(kodo_sql_escape "$domain")"
@@ -496,6 +519,10 @@ kodo_pipeline_set() {
 
 kodo_pipeline_get() {
     local event_id="$1" domain="$2" key="$3"
+    if [[ ! "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        kodo_log "ERROR: invalid pipeline metadata key: $key"
+        return 1
+    fi
     kodo_sql "SELECT json_extract(metadata_json, '\$.${key}')
         FROM pipeline_state
         WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")';"
