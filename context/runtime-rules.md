@@ -58,10 +58,13 @@ Every pipeline event follows a deterministic state machine per domain.
 You do NOT control transitions — `kodo-transition.sh` does. Your outputs
 feed the transition decisions made by the engine scripts.
 
-- Dev: pending → triaging → generating/auditing → hard_gates → scanning → merge/ballot → releasing → resolved
+- Dev: pending → triaging → generating/auditing/auto_merge/deferred → hard_gates → scanning → merge/ballot → releasing → resolved
 - Mkt: pending → drafting → reviewing → published
 - PM: pending → analyzing → reported
 
+Engines loop through all states in one invocation (no re-dispatch needed for each state).
+CI status is checked before every merge — PENDING causes the engine to yield, FAILURE causes defer.
+Concurrent processing is PID-locked — two engines cannot process the same event simultaneously.
 Invalid transitions are rejected. Deferred events retry max 2 times, then auto-close.
 
 ---
@@ -73,19 +76,28 @@ No preamble, no explanation, no markdown wrapping. Just the JSON object.
 
 Available schemas:
 - `confidence.schema.json` — code review output (score, risks, behavioral assertions)
+- `ballot.schema.json` — ballot vote (approve/reject with score and reason)
 - `triage.schema.json` — issue triage output (priority, labels, duplicates, stale flags)
 - `discovery.schema.json` — repo auto-discovery output (language, CI, conventions)
 - `pm-report.schema.json` — PM weekly analysis (velocity, priorities, roadmap, debt)
 
+For Claude: schemas are passed via `--json-schema` + `--output-format json`.
+For Gemini/Qwen: schemas are injected into the prompt by `kodo_invoke_llm()`.
+Both paths produce validated JSON through the unified LLM abstraction layer.
+
 ---
 
-## Budget Awareness
+## Budget Enforcement
 
-- Claude: $200/month — use for strategy, reviews, quality checks only
-- Codex: $20/month — use for code generation only
-- Gemini: free (1K RPD) — use for bulk content, changelogs, welcomes
-- Qwen: free (1K RPD) — use for triage, gardening, maintenance
+Budget limits are hard-enforced inside `kodo_invoke_llm()`. Every LLM call checks
+monthly spend before invoking. Exceeding the limit is structurally impossible.
 
+- Claude: **$200/month** hard cap — strategy, reviews, quality checks only
+- Codex: **$20/month** hard cap — code generation only
+- Gemini: free (1K RPD) — bulk content, changelogs, welcomes
+- Qwen: free (1K RPD) — triage, gardening, maintenance
+
+Telegram alert fires at 80% threshold (once per day). Hard block at 100%.
 **The expensive model does strategy. The free models do volume.**
 
 ---

@@ -17,7 +17,7 @@ You are ONE of four CLI agents in KODO. Your domain: DEV (code generation only).
 5. **Size**: Keep diffs under 500 lines. Split larger changes into multiple PRs.
 6. **Safety**: Never modify CI configs, security-sensitive files, or deploy scripts.
 7. **Commits**: Use format `kodo(dev): {action} -- {detail}`
-8. **Structured output**: When `--json-schema` is provided, output ONLY valid JSON. No preamble.
+8. **Structured output**: When the prompt includes a JSON schema, output ONLY valid JSON matching it. No preamble, no code fences, no explanation.
 
 ## Shared Rules
 
@@ -26,7 +26,7 @@ The following are enforced by the engine scripts and `context/runtime-rules.md`:
 - Never bypass state machine transitions
 - Never take write actions in shadow mode
 - All git operations go through `kodo-git.sh`
-- Budget: $20/month for Codex — used for code generation only
+- Budget: $20/month for Codex — hard-enforced, blocked at limit
 
 ## Anti-Patterns
 

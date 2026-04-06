@@ -75,10 +75,13 @@ feed the transition decisions made by engine scripts.
 
 ### Dev Domain
 ```
-[*] → pending → triaging → generating → hard_gates → auditing → scanning → auto_merge → releasing → resolved
-                                                                    ├─► balloting → guarded_merge
-                                                                    └─► deferred (retry max 2) → closed
+[*] → pending → triaging ─┬─► generating → hard_gates → auditing → scanning ─┬─► auto_merge → releasing → resolved
+                           ├─► auditing (PRs)                                  ├─► balloting → guarded_merge → releasing
+                           ├─► auto_merge (deps, zero LLM)                     └─► deferred (retry max 2) → closed
+                           └─► deferred (docs, duplicates, wontfix)
 ```
+Note: Engine loops through all states in one invocation. CI status is checked before every merge.
+Concurrent processing is PID-locked — two engines cannot process the same event simultaneously.
 
 ### Marketing Domain
 ```
@@ -100,6 +103,7 @@ No preamble, no explanation, no markdown wrapping. Just the JSON object.
 | Schema | Purpose |
 |--------|---------|
 | `schemas/confidence.schema.json` | Code review: score, risks, behavioral assertions |
+| `schemas/ballot.schema.json` | Ballot vote: approve/reject with score and reason |
 | `schemas/triage.schema.json` | Issue triage: priority, labels, duplicates, stale flags |
 | `schemas/discovery.schema.json` | Repo discovery: language, CI, conventions |
 | `schemas/pm-report.schema.json` | PM weekly: velocity, priorities, roadmap, debt |
@@ -111,8 +115,16 @@ No preamble, no explanation, no markdown wrapping. Just the JSON object.
 1. **Layer 1** — Hard gates (deterministic, no LLM): tests, semgrep, diff size, scope
 2. **Layer 1.5** — Auto-generated regression tests (Codex)
 3. **Layer 2** — LLM review (you: confidence scoring via confidence.schema.json)
-4. **Layer 3** — Balloting (you + Gemini + Qwen, 2/3 consensus for medium confidence)
-5. **Post-merge** — 48h rollback window
+4. **Layer 2.5** — Security scan (semgrep on changed files, confidence penalty for findings)
+5. **Layer 3** — Balloting (you + Gemini + Qwen vote in parallel, 2/3 consensus for medium confidence)
+6. **Pre-merge** — CI status check (`pr-checks`): green required, pending = yield, red = defer
+7. **Post-merge** — 48h rollback window
+
+## Budget Enforcement
+
+Every LLM call passes through `kodo_invoke_llm()` which checks monthly spend before invoking.
+Claude is hard-blocked at $200/mo, Codex at $20/mo. Telegram alert fires at 80%.
+Free-tier CLIs (Gemini, Qwen) bypass the check. You cannot exceed budget — the gate is structural.
 
 ---
 
@@ -182,5 +194,7 @@ cron (4 entries)
 
 ### Database Tables
 `pipeline_state` · `pending_events` · `community_log` · `pm_artifacts` · `budget_ledger` · `repo_metrics` · `merge_outcomes` · `deferred_queue` · `confidence_bands`
+
+Key columns in `pipeline_state`: `payload_json` (event data from GitHub), `metadata_json` (inter-state data: confidence, model, ballot results, CI state), `processing_pid` (concurrent processing lock).
 
 Schema: `sql/schema.sql`

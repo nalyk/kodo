@@ -28,7 +28,7 @@ You have repos. Things happen in them — PRs open, issues pile up, releases shi
 
 KŌDŌ handles it. Three engines run in parallel:
 
-**Dev** — Reviews every PR with structured confidence scoring. Score ≥90: auto-merge. Score 50-89: three AI models vote, 2/3 consensus required. Score <50: deferred, you deal with it. Hard gates (tests, semgrep, diff size) run *before* any AI touches it. 48h post-merge rollback window.
+**Dev** — Reviews every PR with structured confidence scoring. Score ≥90: auto-merge. Score 50-89: three AI models vote in parallel, 2/3 consensus required. Score <50: deferred, you deal with it. Hard gates (tests, semgrep, diff size) run *before* any AI touches it. CI status verified before every merge. 48h post-merge rollback window. Dependency updates from Dependabot/Renovate take a zero-LLM fast path — detected, merged, released in under a second.
 
 **Marketing** — Welcomes first-time contributors within minutes. Generates changelogs from commit history. Curates good-first-issues. Runs contributor spotlights. All with the repo's own voice, not generic AI slop.
 
@@ -49,6 +49,8 @@ Classification is bash `case` statements. No LLM decides what goes where.
 
 The expensive model thinks. The free models work. Total: **$220/mo** for 3-5 active repos.
 
+Budget enforcement is baked into the LLM abstraction layer. Every CLI call checks monthly spend before invoking. Telegram alert at 80%. Hard block at 100%. Free-tier CLIs bypass the check. Surprise bills are structurally impossible.
+
 When Claude goes down, the system doesn't make bad decisions. It queues events, degrades gracefully for 30 minutes, then hibernates. No merge happens without the confidence it deserves.
 
 ---
@@ -64,16 +66,23 @@ auto-generated regression tests (Codex writes tests for the diff)
     ↓ no surprises
 confidence review (Claude scores 0-100, structured JSON)
     ↓ score ≥ 90
+CI status check (gh pr checks — green required)
+    ↓ CI green
 auto-merge → 48h rollback window → resolved
 
     ↓ score 50-89
-ballot (Claude + Gemini + Qwen vote independently, 2/3 required)
+ballot (Claude + Gemini + Qwen vote in parallel, 2/3 required)
 
-    ↓ score < 50 or any gate fails
+    ↓ CI pending
+engine yields, Brain re-dispatches when CI completes
+
+    ��� score < 50 or CI red or any gate fails
 deferred (retry twice, then close with explanation)
 ```
 
 Shadow mode runs the entire pipeline but takes zero write actions. Flip one TOML value when you trust it.
+
+Concurrent processing is PID-locked — two Brain cycles can't dispatch the same event to the same engine. Stale PIDs from crashed processes are detected and reclaimed automatically.
 
 All state transitions go through one file (`kodo-transition.sh`). Invalid transitions are rejected. The state machine has 30+ transitions across three domains and every single one is explicitly enumerated.
 
@@ -83,9 +92,9 @@ All state transitions go through one file (`kodo-transition.sh`). Invalid transi
 
 ```
 ~/.kodo/
-├── bin/                      11 scripts, ~2500 lines
+├── bin/                      11 scripts, ~3200 lines
 ├── context/runtime-rules.md  shared rules injected into every LLM prompt
-├── schemas/                  4 JSON schemas — all LLM output is structured
+├── schemas/                  5 JSON schemas — all LLM output is structured
 ├── repos/                    per-repo TOML configs (auto-generated on onboard)
 ├── crontab.txt               4 lines. the whole schedule
 └── kodo.db                   SQLite. 9 tables. the brain's memory
@@ -106,7 +115,7 @@ Plus your git provider CLI: `gh` or `glab`
 
 ### Status
 
-Working implementation. Not battle-tested yet. Shadow mode exists for a reason — use it.
+Working implementation. Full-cycle tested against `yoda-digital/iris-gateway` — Scout through resolved, all three engines, all state paths. Shadow mode verified. Dependabot auto-merge path: pending to resolved in under 1 second.
 
 The confidence bands self-calibrate over time. Start conservative. Let the data tell you when to trust it.
 
