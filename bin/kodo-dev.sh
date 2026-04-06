@@ -618,6 +618,7 @@ Review the change for correctness, security, and safety. Cast your vote.")"
     # Collect structured votes in PARALLEL — all 3 CLIs run concurrently
     local vote_dir
     vote_dir=$(mktemp -d)
+    trap 'rm -rf "$vote_dir"' RETURN
 
     _cast_ballot() {
         local cli="$1" outfile="$vote_dir/$cli.json"
@@ -792,7 +793,7 @@ do_guarded_merge() {
         WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND domain = 'dev';")
     if [[ -n "$created_at" ]]; then
         local age_hours
-        age_hours=$(kodo_sql "SELECT CAST((julianday('now') - julianday('$created_at')) * 24 AS INTEGER);")
+        age_hours=$(kodo_sql "SELECT CAST((julianday('now') - julianday('$(kodo_sql_escape "$created_at")')) * 24 AS INTEGER);")
         if [[ "$age_hours" -gt 48 ]]; then
             defer "guarded merge timeout: $age_hours hours > 48h window"
             return

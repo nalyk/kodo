@@ -136,7 +136,10 @@ dispatch_engine() {
     # Create pipeline state (with payload for engines to read)
     export KODO_TRANSITION_REPO="$repo"
     export KODO_TRANSITION_PAYLOAD="$payload"
-    "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "*" "pending" "$domain" 2>&1 || true
+    if ! "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "*" "pending" "$domain" 2>&1; then
+        kodo_log "BRAIN: FAILED to create pipeline state for $event_id [$domain] — event stays in pending"
+        return 1
+    fi
 
     # Dispatch engine as background process
     "$engine_script" "$event_id" "$toml" "$domain" >> "$KODO_LOG_DIR/${domain}.log" 2>&1 &
@@ -170,6 +173,7 @@ main() {
             kodo_log "BRAIN: $event_id ($event_type) on $repo → [$domains]"
 
             # Dispatch to each domain
+            local dispatch_ok=true
             for domain in $domains; do
                 # Check if already in pipeline for this domain (any state = skip)
                 local existing
@@ -178,12 +182,16 @@ main() {
                 if [[ "$existing" -gt 0 ]]; then
                     continue
                 fi
-                dispatch_engine "$domain" "$event_id" "$repo" "$payload"
+                dispatch_engine "$domain" "$event_id" "$repo" "$payload" || dispatch_ok=false
             done
 
-            # Remove from pending queue
-            kodo_sql "DELETE FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")';"
-            processed=$((processed + 1))
+            # Only remove from pending if all dispatches succeeded
+            if [[ "$dispatch_ok" == "true" ]]; then
+                kodo_sql "DELETE FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")';"
+                processed=$((processed + 1))
+            else
+                kodo_log "BRAIN: keeping $event_id in pending — dispatch failed for some domains"
+            fi
 
         done <<< "$events"
     fi

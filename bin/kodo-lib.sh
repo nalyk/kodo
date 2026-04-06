@@ -478,6 +478,11 @@ _llm_log_fail() {
 
 kodo_pipeline_set() {
     local event_id="$1" domain="$2" key="$3" value="$4"
+    # Validate key is a safe identifier (prevents SQL/JSON path injection)
+    if [[ ! "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        kodo_log "ERROR: invalid pipeline metadata key: $key"
+        return 1
+    fi
     local eid dom
     eid="$(kodo_sql_escape "$event_id")"
     dom="$(kodo_sql_escape "$domain")"
@@ -496,6 +501,10 @@ kodo_pipeline_set() {
 
 kodo_pipeline_get() {
     local event_id="$1" domain="$2" key="$3"
+    if [[ ! "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        kodo_log "ERROR: invalid pipeline metadata key: $key"
+        return 1
+    fi
     kodo_sql "SELECT json_extract(metadata_json, '\$.${key}')
         FROM pipeline_state
         WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")';"

@@ -36,6 +36,7 @@ echo "=== Phase 1: Discovering $OWNER/$REPO ==="
 
 # Create a temporary TOML to use kodo-git.sh for discovery
 local_tmp=$(mktemp)
+trap 'rm -f "$local_tmp"' EXIT
 cat > "$local_tmp" <<EOF
 [repo]
 owner = "$OWNER"

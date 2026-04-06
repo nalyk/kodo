@@ -60,7 +60,12 @@ _gh_pr_merge() {
 # gh pr checks uses: state = PENDING | SUCCESS | FAILURE | CANCELLED | ERROR | EXPECTED | NEUTRAL | STALE | SKIPPED
 _gh_pr_checks() {
     local slug="$1" pr_num="$2"
-    gh pr checks "$pr_num" --repo "$slug" --json name,state,bucket 2>/dev/null | jq -c '{
+    local raw
+    raw=$(gh pr checks "$pr_num" --repo "$slug" --json name,state,bucket 2>&1) || {
+        kodo_log "ERROR: gh pr checks failed for $slug #$pr_num: ${raw:0:200}"
+        return 1
+    }
+    echo "$raw" | jq -c '{
         total: length,
         pass: [.[] | select(.bucket == "pass")] | length,
         fail: [.[] | select(.bucket == "fail")] | length,
@@ -209,9 +214,7 @@ _gh_repo_clone() {
 # Create a branch in a local clone and push it
 _gh_branch_create() {
     local work_dir="$1" branch_name="$2"
-    cd "$work_dir" || return 1
-    git checkout -b "$branch_name" 2>/dev/null
-    cd - >/dev/null
+    ( cd "$work_dir" && git checkout -b "$branch_name" )
 }
 
 # Create a PR from a branch
@@ -223,10 +226,7 @@ _gh_pr_create() {
 # Push a branch from a working directory
 _gh_branch_push() {
     local work_dir="$1" branch_name="$2"
-    cd "$work_dir" || return 1
-    # --force-with-lease: safe force push — allows retry when branch exists from prior run
-    git push --force-with-lease origin "$branch_name" 2>/dev/null
-    cd - >/dev/null
+    ( cd "$work_dir" && git push --force-with-lease origin "$branch_name" )
 }
 
 # Clean up a working directory
