@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "KODO Confidence Review",
+  "description": "Structured output from LLM code review",
+  "type": "object",
+  "required": ["score", "recommendation", "risks", "behavioral_assertions"],
+  "properties": {
+    "score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Confidence score for merge safety"
+    },
+    "recommendation": {
+      "type": "string",
+      "enum": ["auto_merge", "ballot", "defer"],
+      "description": "Recommended action based on score"
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "description"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+          "description": { "type": "string" },
+          "file": { "type": "string" },
+          "line": { "type": "integer" }
+        }
+      }
+    },
+    "behavioral_assertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["assertion", "covered_by_tests"],
+        "properties": {
+          "assertion": { "type": "string", "description": "e.g. function X now returns null instead of throwing" },
+          "covered_by_tests": { "type": "boolean" }
+        }
+      }
+    },
+    "summary": {
+      "type": "string",
+      "description": "Brief summary of review findings"
+    }
+  },
+  "additionalProperties": false
+}

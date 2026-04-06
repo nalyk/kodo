@@ -1,0 +1,11 @@
+kodo.db
+kodo.db-journal
+kodo.db-wal
+logs/
+repos/*.toml
+!repos/_template.toml
+*.voice.md
+*.kodo.md
+.brain.lock
+.claude/CLAUDE.md
+telegram.conf

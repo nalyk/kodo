@@ -1,0 +1,5 @@
+# KODO v4 — Exactly 4 cron entries. Do NOT add more.
+*/2 * * * * ~/.kodo/bin/kodo-scout.sh >> ~/.kodo/logs/scout.log 2>&1
+*   * * * * ~/.kodo/bin/kodo-brain.sh >> ~/.kodo/logs/brain.log 2>&1
+0  10 * * * ~/.kodo/bin/kodo-pm.sh --daily-triage >> ~/.kodo/logs/pm.log 2>&1
+0   9 * * 1 ~/.kodo/bin/kodo-weekly.sh >> ~/.kodo/logs/weekly.log 2>&1

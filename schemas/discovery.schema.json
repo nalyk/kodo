@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "KODO Repo Discovery",
+  "description": "Structured output from repo auto-discovery",
+  "type": "object",
+  "required": ["language", "ci_system", "branch_default"],
+  "properties": {
+    "language": { "type": "string", "description": "Primary language (e.g. javascript, python, go)" },
+    "framework": { "type": "string", "description": "Primary framework if detected" },
+    "ci_system": { "type": "string", "enum": ["github_actions", "gitlab_ci", "circleci", "travis", "jenkins", "none"] },
+    "test_command": { "type": "string", "description": "Command to run tests (e.g. npm test)" },
+    "lint_command": { "type": "string", "description": "Command to run linter" },
+    "branch_default": { "type": "string", "description": "Default branch name" },
+    "branch_protection": { "type": "boolean", "description": "Whether branch protection is enabled" },
+    "labels": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Existing labels in the repo"
+    },
+    "has_milestones": { "type": "boolean" },
+    "has_discussions": { "type": "boolean" },
+    "description": { "type": "string", "description": "Repo description from README" },
+    "conventions": {
+      "type": "object",
+      "properties": {
+        "commit_style": { "type": "string" },
+        "pr_template": { "type": "boolean" },
+        "issue_template": { "type": "boolean" },
+        "changelog_format": { "type": "string" }
+      }
+    },
+    "release_pattern": { "type": "string", "description": "Detected release/tag pattern (e.g. v1.2.3)" },
+    "contributor_count": { "type": "integer" }
+  },
+  "additionalProperties": false
+}

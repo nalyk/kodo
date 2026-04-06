@@ -1,0 +1,49 @@
+# KODO Repo Configuration Template
+# Copy to repos/{owner}-{repo}.toml and customize
+
+[repo]
+owner = ""                              # GitHub/GitLab owner or org
+name = ""                               # Repository name
+provider = "github"                     # github | gitlab | gitea | bitbucket
+mode = "shadow"                         # shadow | live
+branch_default = "main"                 # Default branch name
+
+[dev]
+enabled = true                          # Enable dev engine
+test_command = "npm test"               # Command to run tests
+lint_command = "npm run lint"           # Command to run linter
+max_diff_lines = 500                    # Hard gate: max diff size
+auto_merge_deps = true                  # Auto-merge dependency updates if CI green
+semver_release = true                   # Auto-tag semver releases after merge
+
+[mkt]
+enabled = true                          # Enable marketing engine
+welcome_new_contributors = true         # Auto-welcome first-time contributors
+generate_changelogs = true              # Auto-generate release changelogs
+good_first_issues = true                # Curate good-first-issue labels weekly
+contributor_spotlights = true           # Monthly contributor recognition
+
+[pm]
+enabled = true                          # Enable PM engine
+weekly_report = true                    # Generate weekly velocity/roadmap report
+daily_triage = true                     # Daily backlog grooming via Qwen
+feature_evaluation = true               # Evaluate new feature requests
+telegram_digest = true                  # Send weekly digest to Telegram
+
+# Optional: self-hosted instance
+# [provider]
+# api_base = "https://gitlab.company.com"
+
+# Optional: voice profile for marketing content
+# [voice]
+# tone = "technical but approachable"
+# vocabulary = ["contributors", "community", "ship"]
+# anti_patterns = ["leverage", "synergy", "excited to announce"]
+# personality = "a senior engineer who writes clearly and hates fluff"
+
+# Optional: external signal feeds for PM
+# [signals]
+# competitor_repos = ["competitor/project"]
+# npm_package = "my-package"
+# stackoverflow_tag = "my-framework"
+# rss_feeds = ["https://blog.example.com/feed.xml"]

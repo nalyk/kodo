@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "KODO PM Report",
+  "description": "Structured output from PM weekly analysis",
+  "type": "object",
+  "required": ["velocity", "priorities", "roadmap_status"],
+  "properties": {
+    "velocity": {
+      "type": "object",
+      "required": ["prs_merged", "issues_closed", "issues_opened"],
+      "properties": {
+        "prs_merged": { "type": "integer" },
+        "issues_closed": { "type": "integer" },
+        "issues_opened": { "type": "integer" },
+        "avg_time_to_merge_hours": { "type": "number" },
+        "avg_confidence": { "type": "number" },
+        "trend": { "type": "string", "enum": ["accelerating", "stable", "slowing"] }
+      }
+    },
+    "priorities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["issue_number", "title", "priority", "reasoning"],
+        "properties": {
+          "issue_number": { "type": "integer" },
+          "title": { "type": "string" },
+          "priority": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+          "reasoning": { "type": "string" }
+        }
+      }
+    },
+    "roadmap_status": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["milestone", "progress_pct"],
+        "properties": {
+          "milestone": { "type": "string" },
+          "progress_pct": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "due_date": { "type": ["string", "null"] },
+          "at_risk": { "type": "boolean" },
+          "blockers": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "tech_debt": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["description", "severity"],
+        "properties": {
+          "description": { "type": "string" },
+          "severity": { "type": "string", "enum": ["low", "medium", "high"] },
+          "related_issues": { "type": "array", "items": { "type": "integer" } }
+        }
+      }
+    },
+    "competitive_landscape": {
+      "type": "object",
+      "properties": {
+        "competitor_activity": { "type": "array", "items": { "type": "string" } },
+        "market_signals": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "recommendations": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": false
+}
