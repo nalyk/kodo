@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KŌDŌ — Autonomous Repo Ops via Headless CLIs</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Outfit:wght@300;500;700;900&display=swap');
+:root{--bg:#050608;--surface:#0a0c13;--border:#141827;--accent:#f43f5e;--accent2:#22d3ee;--accent3:#a78bfa;--text:#e2e8f0;--dim:#4a5568;--green:#10b981;--amber:#f59e0b;--red:#ef4444;--blue:#3b82f6;--dev:#f43f5e;--mkt:#22d3ee;--pm:#a78bfa}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;padding:1.2rem .6rem;min-height:100vh}
+.mono{font-family:'JetBrains Mono',monospace}
+
+.hero{text-align:center;margin-bottom:1.5rem;padding:2rem 1rem;border:1px solid var(--border);border-radius:12px;background:radial-gradient(ellipse at 30% 0%,rgba(244,63,94,.05) 0%,transparent 50%),radial-gradient(ellipse at 70% 0%,rgba(34,211,238,.05) 0%,transparent 50%)}
+.hero .dead{color:var(--dim);font-size:.65rem;text-decoration:line-through;display:block;margin-bottom:.4rem;letter-spacing:.02em}
+.hero h1{font-size:clamp(1.8rem,5vw,3rem);font-weight:900;letter-spacing:-.04em}
+.hero h1 .g{background:linear-gradient(135deg,var(--dev),var(--mkt),var(--pm));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero .def{color:var(--dim);font-size:.78rem;margin-top:.5rem;line-height:1.6;max-width:700px;margin-left:auto;margin-right:auto}
+.hero .def strong{color:var(--text)}
+
+.domains{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:.7rem;max-width:900px;margin:1.5rem auto 2rem;padding:0 .5rem}
+.domain{border:1px solid var(--border);border-radius:8px;padding:.8rem 1rem;font-size:.72rem;line-height:1.5}
+.domain h3{font-size:.8rem;font-weight:700;margin-bottom:.4rem;display:flex;align-items:center;gap:.4rem}
+.domain h3 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.domain ul{list-style:none;color:var(--dim);padding:0}
+.domain li{padding:.1rem 0}
+.domain li::before{content:"→ ";color:var(--dim)}
+.d-dev{border-left:3px solid var(--dev)}.d-dev h3{color:var(--dev)}.d-dev h3 .dot{background:var(--dev)}
+.d-mkt{border-left:3px solid var(--mkt)}.d-mkt h3{color:var(--mkt)}.d-mkt h3 .dot{background:var(--mkt)}
+.d-pm{border-left:3px solid var(--pm)}.d-pm h3{color:var(--pm)}.d-pm h3 .dot{background:var(--pm)}
+
+.s{max-width:1100px;margin:0 auto 1.8rem;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .3s}
+.s:hover{border-color:rgba(244,63,94,.3)}
+.sh{padding:.6rem 1rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+.sh .n{font-size:.55rem;color:var(--accent);background:rgba(244,63,94,.1);padding:.1rem .4rem;border-radius:3px;font-weight:700}
+.sh h2{font-size:.82rem;font-weight:600;flex:1}
+.sh .t{font-size:.48rem;padding:.1rem .35rem;border-radius:3px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+.t-dev{color:var(--dev);background:rgba(244,63,94,.1)}
+.t-mkt{color:var(--mkt);background:rgba(34,211,238,.1)}
+.t-pm{color:var(--pm);background:rgba(167,139,250,.1)}
+.t-core{color:var(--green);background:rgba(16,185,129,.1)}
+.t-honest{color:var(--amber);background:rgba(245,158,11,.1)}
+
+.body{padding:1.2rem .8rem;overflow-x:auto;display:flex;justify-content:center}
+.body .mermaid{width:100%;min-width:450px}
+.body svg{max-width:100%;height:auto !important}
+
+.note{padding:.7rem 1rem;border-top:1px solid var(--border);font-size:.7rem;line-height:1.7;color:var(--dim)}
+.note strong{color:var(--text)}.note .r{color:var(--accent)}.note .g{color:var(--green)}.note .b{color:var(--accent2)}.note .p{color:var(--accent3)}
+.note .cmd{font-size:.62rem;color:var(--accent2);background:rgba(34,211,238,.06);padding:.05rem .2rem;border-radius:2px}
+
+.nav{display:flex;flex-wrap:wrap;justify-content:center;gap:.3rem;margin-bottom:1.8rem;padding:0 .5rem}
+.nav a{padding:.28rem .55rem;border-radius:4px;background:var(--surface);border:1px solid var(--border);color:var(--dim);text-decoration:none;font-size:.58rem;transition:all .2s;white-space:nowrap}
+.nav a:hover{border-color:var(--accent);color:var(--text)}
+
+@media(max-width:768px){body{padding:.6rem .2rem}.body .mermaid{min-width:320px}.body{padding:.7rem .3rem}.domains{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1><span class="g">KŌDŌ</span></h1>
+  <div class="def">
+    <strong>Autonomous Repo Ops via Headless CLIs</strong><br>
+    Three domains: Development · Marketing/Community · Project Management<br>
+    Four CLIs (Claude, Codex, Gemini, Qwen) · Any git repo · Zero human · $220/mo<br><br>
+    <span style="color:var(--dim);font-size:.68rem">KŌDŌ (鼓動, "heartbeat") is a set of bash scripts, markdown specs, and cron jobs<br>that orchestrate headless AI CLIs to autonomously maintain git repositories.<br>It handles code review, community engagement, and project management<br>across unlimited repos from a single <span class="cmd">~/.kodo/</span> directory.</span>
+  </div>
+</div>
+
+<div class="domains">
+  <div class="domain d-dev">
+    <h3><span class="dot"></span>DEVELOPMENT OPS</h3>
+    <ul>
+      <li>PR triage, review, merge</li>
+      <li>Issue auto-fix via code generation</li>
+      <li>Dependency updates + security gates</li>
+      <li>CI monitoring + auto-revert</li>
+      <li>Release management (semver)</li>
+      <li>Post-merge regression watch</li>
+    </ul>
+  </div>
+  <div class="domain d-mkt">
+    <h3><span class="dot"></span>MARKETING / COMMUNITY OPS</h3>
+    <ul>
+      <li>Instant contributor response (&lt;2min)</li>
+      <li>README/docs quality maintenance</li>
+      <li>Changelog + release announcements</li>
+      <li>"Good first issue" curation</li>
+      <li>Contributor recognition + shoutouts</li>
+      <li>GitHub Discussions engagement</li>
+      <li>Star/fork growth mechanics</li>
+    </ul>
+  </div>
+  <div class="domain d-pm">
+    <h3><span class="dot"></span>PROJECT MANAGEMENT OPS</h3>
+    <ul>
+      <li>Roadmap generation from issues/milestones</li>
+      <li>Priority scoring + backlog grooming</li>
+      <li>Feature proposal evaluation</li>
+      <li>Sprint/milestone progress tracking</li>
+      <li>Weekly digest + velocity reporting</li>
+      <li>Technical debt inventory</li>
+    </ul>
+  </div>
+</div>
+
+<nav class="nav">
+  <a href="#d1">Full Architecture</a>
+  <a href="#d2">Domain Routing</a>
+  <a href="#d3">Dev Ops Flow</a>
+  <a href="#d4">Marketing Ops Flow</a>
+  <a href="#d5">PM Ops Flow</a>
+  <a href="#d6">CLI Role Assignment</a>
+  <a href="#d7">Repo Lifecycle</a>
+  <a href="#d8">File System</a>
+  <a href="#d9">Budget by Domain</a>
+  <a href="#d10">7 Limits Solved</a>
+</nav>
+
+<!-- 1. FULL ARCHITECTURE -->
+<div class="s" id="d1">
+  <div class="sh"><span class="n mono">01</span><h2>Full Architecture: Scout → Brain → Three Domain Engines</h2><span class="t t-core">complete system</span></div>
+  <div class="body"><pre class="mermaid">
+graph TB
+    subgraph WSL["WSL2 · ~/.kodo/ (universal home)"]
+        direction TB
+
+        subgraph Scout["SCOUT (bash · $0 · every 2 min)"]
+            SC["kodo-scout.sh\nfor each repos/*.toml:\n  gh api pulls, issues, discussions,\n  releases, contributors, milestones\n  diff vs DB → INSERT pending_events"]
+        end
+
+        subgraph Brain["BRAIN (bash router · flock protected)"]
+            BR["kodo-brain.sh\nSELECT pending_events\nClassify: dev | marketing | pm\nRoute to domain engine"]
+        end
+
+        subgraph DevEngine["DEV ENGINE"]
+            DE1["kodo-dev.sh\nPR review · code gen · CI watch\nmerge · release · revert"]
+        end
+
+        subgraph MktEngine["MARKETING ENGINE"]
+            MK1["kodo-mkt.sh\ncontributor response · docs refresh\nchangelog · announcements\ngood-first-issues · discussions"]
+        end
+
+        subgraph PmEngine["PM ENGINE"]
+            PM1["kodo-pm.sh\nroadmap · backlog · priorities\nvelocity · digest · debt tracking"]
+        end
+
+        subgraph StateMachine["STATE (bash-enforced · deterministic)"]
+            SM["kodo-transition.sh\ndev states: pending→generating→auditing→merged\nmkt states: pending→drafting→published\npm states: pending→analyzing→reported"]
+        end
+
+        subgraph CLIs["Headless CLIs"]
+            CL["claude -p\nPrimary: reviews, strategy,\nPM analysis, content quality"]
+            CO["codex exec\nPrimary: code generation,\nimplementation, fixes"]
+            GE["gemini -p\nPrimary: docs, community content,\nsecurity summaries, bulk writing"]
+            QW["qwen -p\nPrimary: triage, gardening,\nroutine maintenance, fallback"]
+        end
+
+        subgraph Data["DATA"]
+            DB["kodo.db\npipeline_state · pending_events\ncommunity_log · pm_artifacts\nbudget_ledger · repo_metrics"]
+        end
+
+        subgraph Registry["REPOS"]
+            R1["repos/my-api.toml"]
+            R2["repos/docs-site.toml"]
+            R3["repos/any-repo.toml"]
+        end
+    end
+
+    subgraph Ext["External"]
+        GH["GitHub (any repo)"]
+        TG["Telegram (digests + status)"]
+    end
+
+    SC -->|"events"| DB
+    BR -->|"read queue"| DB
+    BR -->|"dev events"| DE1
+    BR -->|"mkt events"| MK1
+    BR -->|"pm events"| PM1
+
+    DE1 --> SM
+    MK1 --> SM
+    PM1 --> SM
+
+    DE1 -->|"review/fix"| CL & CO
+    MK1 -->|"content"| GE & CL
+    PM1 -->|"analysis"| CL & QW
+
+    SM -->|"update"| DB
+    DE1 & MK1 & PM1 -->|"gh CLI"| GH
+    PM1 -->|"weekly digest"| TG
+  </pre></div>
+  <div class="note">
+    <strong>Three parallel domain engines</strong> sharing one scout, one brain, one state layer. Each engine has its own state machine, its own skills, and its own CLI routing. The scout/brain pattern feeds into three parallel processing paths — dev, marketing, and PM events are detected together but processed independently.
+  </div>
+</div>
+
+<!-- 2. DOMAIN ROUTING -->
+<div class="s" id="d2">
+  <div class="sh"><span class="n mono">02</span><h2>Event Classification: What Goes Where</h2><span class="t t-core">the router</span></div>
+  <div class="body"><pre class="mermaid">
+flowchart LR
+    subgraph Events["GitHub Events (detected by scout)"]
+        E1["PullRequestEvent"]
+        E2["IssuesEvent"]
+        E3["PushEvent"]
+        E4["ReleaseEvent"]
+        E5["ForkEvent / WatchEvent"]
+        E6["IssueCommentEvent"]
+        E7["DiscussionEvent"]
+        E8["MilestoneEvent"]
+    end
+
+    subgraph Classify["kodo-brain.sh classifier"]
+        CL1{"PR or push\nor CI?"}
+        CL2{"New contributor\nor community?"}
+        CL3{"Milestone, label,\nor planning?"}
+    end
+
+    subgraph Engines["Domain Engines"]
+        DEV["DEV ENGINE\nkodo-dev.sh"]
+        MKT["MARKETING ENGINE\nkodo-mkt.sh"]
+        PM["PM ENGINE\nkodo-pm.sh"]
+    end
+
+    E1 --> CL1 --> DEV
+    E3 --> CL1
+    E2 -->|"bug/feature"| CL1
+    E2 -->|"question/help"| CL2
+    E4 --> MKT
+    E5 --> CL2 --> MKT
+    E6 -->|"from external contributor"| CL2
+    E6 -->|"review/technical"| CL1
+    E7 --> CL2
+    E8 --> CL3 --> PM
+    E2 -->|"priority/roadmap label"| CL3
+  </pre></div>
+  <div class="note">
+    <strong>Classification is bash, not LLM.</strong> Event type + author + labels = deterministic routing. An issue labeled "bug" from an external contributor routes to BOTH dev (for fix) and marketing (for welcome response). A release event routes to marketing (announcement + changelog). A milestone event routes to PM. No LLM needed for routing — only for processing.
+  </div>
+</div>
+
+<!-- 3. DEV OPS FLOW -->
+<div class="s" id="d3">
+  <div class="sh"><span class="n mono">03</span><h2>Development Ops: The Refined Change Pipeline</h2><span class="t t-dev">dev domain</span></div>
+  <div class="body"><pre class="mermaid">
+stateDiagram-v2
+    [*] --> pending: scout detects PR/issue
+
+    pending --> triaging: brain classifies as dev
+
+    triaging --> generating: issue needs code (codex exec)
+    triaging --> auditing: PR ready for review (claude -p)
+    triaging --> auto_merge: deps + CI green (zero LLM)
+
+    generating --> hard_gates: diff produced
+    generating --> deferred: codex failed 3x
+
+    state "hard-gates" as hard_gates
+    note right of hard_gates
+        Layer 1 (deterministic, no LLM):
+        • test suite must pass
+        • semgrep / npm audit clean
+        • diff ≤ max_diff_lines
+        • scope limited to related files
+    end note
+
+    hard_gates --> auditing: all gates pass
+    hard_gates --> deferred: any gate fails
+
+    auditing --> scanning: claude confidence ≥ 50
+    auditing --> deferred: confidence < 50
+
+    scanning --> auto_merge: confidence ≥ 90 + scan clean
+    scanning --> balloting: confidence 50-89
+    scanning --> deferred: vulnerability found
+
+    balloting --> guarded_merge: 2/3 consensus
+    balloting --> deferred: no consensus
+
+    auto_merge --> releasing: merge success
+    guarded_merge --> releasing: CI green 48h window
+
+    releasing --> resolved: auto-release (semver tag)
+    releasing --> reverting: CI regression in 48h
+
+    reverting --> deferred: revert merged
+
+    deferred --> pending: new commits (max 2)
+    deferred --> closed: auto-close with explanation
+
+    closed --> [*]
+    resolved --> [*]
+  </pre></div>
+  <div class="note">
+    Core principles: <strong>bash-enforced transitions</strong>, hard Layer 1 gates (Semgrep/tests/diff metrics), LLM as advisory Layer 2, principled 48h rollback window, <span class="cmd">--json-schema</span> for structured confidence output. Auto-generated regression tests (Layer 1.5) catch behavioral changes existing tests miss. The <span class="r">releasing state</span> auto-tags a semver release after merge if the repo config enables it — feeding directly into the marketing engine's announcement flow.
+  </div>
+</div>
+
+<!-- 4. MARKETING OPS FLOW -->
+<div class="s" id="d4">
+  <div class="sh"><span class="n mono">04</span><h2>Marketing / Community Ops: Growth Mechanics</h2><span class="t t-mkt">marketing domain</span></div>
+  <div class="body"><pre class="mermaid">
+sequenceDiagram
+    participant GH as GitHub
+    participant SCOUT as kodo-scout.sh
+    participant MKT as kodo-mkt.sh
+    participant GEMINI as gemini -p (content)
+    participant CLAUDE as claude -p (quality)
+    participant DB as kodo.db
+
+    Note over GH: New contributor opens PR #12
+
+    SCOUT->>DB: INSERT pending_event(mkt, new_contributor, PR#12)
+
+    MKT->>DB: read event
+    MKT->>GH: gh api users/{author} (check: first PR to this repo?)
+    MKT->>GEMINI: gemini -p "Welcome message for first-time contributor on {repo}. Repo context: {discovered.lang}, {discovered.description}"
+    GEMINI-->>MKT: welcome message draft
+    MKT->>GH: gh pr comment #12 "Welcome! ..."
+    MKT->>DB: INSERT community_log(repo, author, welcomed)
+
+    Note over GH: Release v1.3.0 published (from dev engine)
+
+    SCOUT->>DB: INSERT pending_event(mkt, release, v1.3.0)
+
+    MKT->>DB: read event
+    MKT->>GH: gh api repos/.../releases/latest
+    MKT->>GH: gh api repos/.../compare/v1.2.0...v1.3.0
+    MKT->>GEMINI: gemini -p "Generate changelog + announcement from these commits. Tone: professional, highlight user-facing changes."
+    GEMINI-->>MKT: changelog draft
+    MKT->>CLAUDE: claude -p "Review this changelog for accuracy and tone" --max-turns 3
+    CLAUDE-->>MKT: reviewed version
+    MKT->>GH: gh release edit v1.3.0 --notes "..."
+    MKT->>DB: INSERT community_log(repo, release_announced)
+
+    Note over GH: Weekly cycle (Sunday)
+
+    MKT->>DB: SELECT repos WHERE mkt.good_first_issues = true
+    MKT->>GH: gh issue list --label "good first issue" --state open
+    MKT->>GEMINI: gemini -p "Review open issues. Suggest 2-3 that could be labeled 'good first issue' for new contributors. Criteria: clear scope, low risk, well-defined acceptance."
+    GEMINI-->>MKT: suggestions
+    MKT->>GH: gh issue edit #{n} --add-label "good first issue"
+
+    MKT->>DB: SELECT contributors WHERE last_30_days > 0
+    MKT->>GEMINI: gemini -p "Draft a brief contributor recognition comment for {repo} thanking these contributors: {list}"
+    GEMINI-->>MKT: recognition draft
+    MKT->>GH: gh discussion create --category "Announcements" --title "Contributor Spotlight" --body "..."
+  </pre></div>
+  <div class="note">
+    <strong>Community engagement as structured event-driven flows, not scheduled content dumps.</strong> The marketing engine is <em>reactive to events</em> (new contributor, new release, weekly cycle) not "fire every 4 hours and generate something." Gemini (free, 1K RPD) handles bulk content. Claude reviews quality on important pieces only. Dedup via <span class="cmd">community_log</span> table prevents duplicate welcomes/announcements.
+  </div>
+</div>
+
+<!-- 5. PM OPS FLOW -->
+<div class="s" id="d5">
+  <div class="sh"><span class="n mono">05</span><h2>PM Ops: Roadmap, Priorities, Velocity</h2><span class="t t-pm">pm domain</span></div>
+  <div class="body"><pre class="mermaid">
+sequenceDiagram
+    participant GH as GitHub
+    participant PM as kodo-pm.sh
+    participant CLAUDE as claude -p (strategy)
+    participant QW as qwen -p (triage)
+    participant DB as kodo.db
+    participant TG as Telegram
+
+    Note over PM: Weekly cycle (Monday 09:00)
+
+    PM->>GH: gh issue list --state open --json title,labels,createdAt,comments
+    PM->>GH: gh milestone list --json title,openIssues,closedIssues,dueOn
+    PM->>GH: gh pr list --state merged --json mergedAt,title (last 7 days)
+    PM->>DB: SELECT merge_count, avg_confidence, avg_time_to_merge FROM repo_metrics
+
+    PM->>CLAUDE: claude -p "Analyze this repo's week. Issues: {json}. Milestones: {json}. Merged: {json}. Metrics: {json}. Generate: 1) velocity report, 2) priority recommendations, 3) roadmap status, 4) technical debt candidates"
+    CLAUDE-->>PM: structured analysis
+
+    PM->>GH: gh issue create --title "Weekly Report: {date}" --label "kodo-pm" --body "{report}"
+    PM->>TG: curl (weekly digest to Telegram)
+    PM->>DB: INSERT pm_artifacts(repo, type=weekly, data)
+
+    Note over PM: Daily (backlog grooming)
+
+    PM->>GH: gh issue list --state open --sort created --json
+    PM->>QW: qwen -p "Triage these issues. For each: suggest priority (P0-P3), suggest labels, flag duplicates, flag stale (>30 days, no activity)"
+    QW-->>PM: triage suggestions
+
+    loop For each suggestion
+        PM->>PM: if stale > 30d AND no comments → auto-close with explanation
+        PM->>PM: if duplicate detected → comment + close
+        PM->>PM: if missing labels → gh issue edit --add-label
+    end
+
+    Note over PM: On new feature request (event-driven)
+
+    PM->>CLAUDE: claude -p "Evaluate this feature request. Repo context: {discovered}. Current roadmap: {milestones}. Assess: feasibility, alignment, effort estimate, priority recommendation"
+    CLAUDE-->>PM: evaluation
+    PM->>GH: gh issue comment #{n} "Kōdō PM Analysis: {evaluation}"
+  </pre></div>
+  <div class="note">
+    <strong>Roadmapping, feature evaluation, velocity tracking, and digest generation</strong> — structured as event-driven analysis, not scheduled content dumps. Claude handles strategic analysis (weekly report, feature evaluation). Qwen handles bulk triage (daily grooming, stale detection, duplicate flagging — free tier, high volume). The PM engine feeds back into dev: a feature proposal rated "high priority" by Claude can auto-create a milestone and route to the dev engine.
+  </div>
+</div>
+
+<!-- 6. CLI ROLE ASSIGNMENT -->
+<div class="s" id="d6">
+  <div class="sh"><span class="n mono">06</span><h2>CLI Role Assignment by Domain</h2><span class="t t-core">budget-optimized</span></div>
+  <div class="body"><pre class="mermaid">
+flowchart TB
+    subgraph Claude["claude -p · Max $200/mo"]
+        direction TB
+        C1["DEV: code review, confidence scoring"]
+        C2["MKT: content quality review (selective)"]
+        C3["PM: strategic analysis, weekly reports,\nfeature evaluation, roadmap assessment"]
+        C4["FALLBACK: none (if Claude down → degraded mode)"]
+    end
+
+    subgraph Codex["codex exec · Pro $20/mo"]
+        direction TB
+        CO1["DEV: code generation, bug fixes,\nimplementation from issue specs"]
+        CO2["MKT: none"]
+        CO3["PM: none"]
+        CO4["FALLBACK: Qwen replaces as generator"]
+    end
+
+    subgraph Gemini["gemini -p · Free 1K RPD"]
+        direction TB
+        G1["DEV: security scan summarization,\ndependency audit triage"]
+        G2["MKT: bulk content — changelogs,\nwelcomes, announcements, docs refresh,\ngood-first-issue curation, contributor spotlights"]
+        G3["PM: none"]
+        G4["FALLBACK: emergency auditor if Claude down\n(confidence capped at 69)"]
+    end
+
+    subgraph Qwen["qwen -p · Free 1K RPD"]
+        direction TB
+        Q1["DEV: none primary"]
+        Q2["MKT: none primary"]
+        Q3["PM: daily backlog triage, stale detection,\nduplicate flagging, label suggestions"]
+        Q4["FALLBACK: emergency generator if Codex down"]
+    end
+
+    Claude ---|"strategic\nexpensive\nselective"| Codex
+    Gemini ---|"bulk content\nfree\nhigh volume"| Qwen
+  </pre></div>
+  <div class="note">
+    <strong>Budget optimization:</strong> Claude ($200/mo) handles only high-stakes decisions — code review, PM strategy, content quality checks. Gemini (free) handles all bulk content generation — changelogs, welcomes, announcements, docs. This is 70% of the marketing engine's work at $0. Qwen (free) handles all routine PM triage — stale issues, duplicate detection, label management. Codex ($20/mo) handles only code generation. <strong>The expensive model does strategy. The free models do volume.</strong>
+  </div>
+</div>
+
+<!-- 7. REPO LIFECYCLE -->
+<div class="s" id="d7">
+  <div class="sh"><span class="n mono">07</span><h2>Repo Lifecycle: Onboard → Shadow → Live</h2><span class="t t-core">safe onboarding</span></div>
+  <div class="body"><pre class="mermaid">
+stateDiagram-v2
+    [*] --> discovering: kodo add owner/repo
+
+    discovering --> validating: claude -p auto-discovers conventions
+    note right of discovering
+        Reads: README, package.json,
+        CI config, branch protection,
+        existing labels, milestones,
+        contributor patterns, release history
+        Generates: repos/name.toml (draft)
+    end note
+
+    validating --> shadow: automated validation passes
+    note right of validating
+        Checks: CI system detected?
+        Test command resolved?
+        Branch protection parsed?
+        Required secrets available?
+        gh auth verified for repo?
+    end note
+    validating --> failed: validation fails → log why
+
+    shadow --> live: N successful shadow cycles + metrics OK
+    note right of shadow
+        Shadow mode:
+        Runs ALL three engines
+        Logs what it WOULD do
+        Does NOT merge/close/comment
+        Measures: how many correct?
+    end note
+
+    live --> [*]: fully autonomous
+
+    failed --> discovering: fix config, retry
+  </pre></div>
+  <div class="note">
+    <strong>Three-phase safe onboarding.</strong> Discovery generates a draft TOML. Validation checks it automatically — no human review. Shadow mode runs all three engines in read-only for a configurable number of cycles (default: 24h for active repos, 7 days for quiet repos). Promotion to live is automatic when shadow accuracy meets thresholds. <strong>Zero human, but not blind trust.</strong>
+  </div>
+</div>
+
+<!-- 8. FILE SYSTEM -->
+<div class="s" id="d8">
+  <div class="sh"><span class="n mono">08</span><h2>File System: ~/.kodo/</h2><span class="t t-core">the whole thing</span></div>
+  <div class="body"><pre class="mermaid">
+graph LR
+    subgraph Home["~/.kodo/"]
+        direction TB
+        subgraph Context["Context Files"]
+            CM["CLAUDE.md — auditor + strategist constitution"]
+            AM["AGENTS.md — code generator rules"]
+            GM[".gemini/GEMINI.md — content + scanner rules"]
+            QM[".qwen/QWEN.md — triage + gardening rules"]
+        end
+
+        subgraph Skills[".claude/skills/ + .gemini/skills/ + .qwen/skills/"]
+            SK1["kodo-audit/ — universal code review"]
+            SK2["kodo-discover/ — repo auto-configuration"]
+            SK3["kodo-changelog/ — release notes generation"]
+            SK4["kodo-welcome/ — contributor onboarding"]
+            SK5["kodo-roadmap/ — weekly PM analysis"]
+            SK6["kodo-triage/ — issue classification"]
+            SK7["kodo-security/ — vuln scan summarization"]
+        end
+
+        subgraph Hooks[".claude/hooks/"]
+            HK1["diff-gate.sh"]
+            HK2["scope-gate.sh"]
+            HK3["budget-gate.sh"]
+        end
+
+        subgraph Bin["bin/ (~250 lines total)"]
+            B1["kodo-scout.sh — event detection"]
+            B2["kodo-brain.sh — event routing"]
+            B3["kodo-dev.sh — dev domain engine"]
+            B4["kodo-mkt.sh — marketing domain engine"]
+            B5["kodo-pm.sh — PM domain engine"]
+            B6["kodo-transition.sh — state machine"]
+            B7["kodo-weekly.sh — self-health + PM weekly"]
+            B8["kodo-status.sh — terminal dashboard"]
+            B9["kodo-add.sh — onboard new repo"]
+        end
+
+        subgraph Schemas["schemas/"]
+            SC1["confidence.schema.json"]
+            SC2["triage.schema.json"]
+            SC3["discovery.schema.json"]
+            SC4["pm-report.schema.json"]
+        end
+
+        subgraph Repos["repos/"]
+            RP1["my-api.toml"]
+            RP2["docs-site.toml"]
+            RP3["_template.toml"]
+        end
+
+        DB["kodo.db"]
+        CRON["crontab.txt — 4 lines"]
+    end
+  </pre></div>
+  <div class="note">
+    <strong>4 crontab lines:</strong><br>
+    <span class="cmd">*/2 * * * * ~/.kodo/bin/kodo-scout.sh</span> — detect events across all repos<br>
+    <span class="cmd">* * * * * ~/.kodo/bin/kodo-brain.sh</span> — process event queue (flock protected)<br>
+    <span class="cmd">0 10 * * * ~/.kodo/bin/kodo-pm.sh --daily-triage</span> — PM daily grooming<br>
+    <span class="cmd">0 9 * * 1 ~/.kodo/bin/kodo-weekly.sh</span> — PM weekly + self-health<br>
+    Deploy: <span class="cmd">git clone ~/.kodo && crontab ~/.kodo/crontab.txt && kodo-add owner/repo</span>
+  </div>
+</div>
+
+<!-- 9. BUDGET BY DOMAIN -->
+<div class="s" id="d9">
+  <div class="sh"><span class="n mono">09</span><h2>Budget Allocation by Domain (per repo, estimated)</h2><span class="t t-honest">estimated, not guaranteed</span></div>
+  <div class="body"><pre class="mermaid">
+pie title Estimated Daily CLI Usage per Active Repo
+    "DEV: Claude reviews (2-5 calls)" : 35
+    "DEV: Codex generation (1-3 calls)" : 15
+    "DEV: Semgrep/tests (bash, $0)" : 10
+    "MKT: Gemini content (5-15 calls, free)" : 25
+    "PM: Qwen triage (5-10 calls, free)" : 10
+    "PM: Claude strategy (1-2 calls)" : 5
+  </pre></div>
+  <div class="note">
+    <strong>Honest estimate:</strong> Per active repo per day: ~3-7 Claude calls, ~1-3 Codex calls, ~10-25 Gemini/Qwen calls (free). With Max plan usage limits, this supports <strong>3-5 moderately active repos</strong> comfortably. For 10+ repos, some would need reduced dev-engine frequency. Marketing and PM engines are almost entirely on free tiers. <em>These are estimates based on architectural analysis. Actual usage depends on repo activity, PR complexity, and model behavior. Shadow mode will measure real numbers before going live.</em>
+  </div>
+</div>
+
+<!-- 10. FORMER LIMITATIONS — NOW SOLVED -->
+<div class="s" id="d10">
+  <div class="sh"><span class="n mono">10</span><h2>7 Former Limitations — Solutions Found</h2><span class="t t-core">all addressed</span></div>
+  <div class="note" style="line-height:1.8;font-size:.72rem">
+
+    <strong style="color:var(--dev)">1. "It will merge bad code sometimes"</strong><br>
+    <strong>Was:</strong> Hard gates + LLM review still miss semantic regressions not covered by tests.<br>
+    <strong style="color:var(--green)">Solution — Auto-generated regression tests + behavioral diff assertions:</strong><br>
+    Before any code merge, add a <strong>Layer 1.5</strong> between hard gates and LLM review. Codex generates targeted test cases specifically for the changed code paths: <span class="cmd">codex exec "Write 3-5 test cases that exercise the behavioral changes in this diff. Focus on edge cases and boundary conditions the existing tests don't cover."</span> Run the generated tests. If they reveal unexpected behavior changes (test written expecting old behavior fails against new code), that's a real signal — lower confidence by 20 points and route to balloting. Additionally, Claude writes <strong>behavioral diff assertions</strong> during review: "This change means function X now returns null instead of throwing when input is empty." Each assertion is checked against existing test coverage. Uncovered assertions get flagged in the review comment. This doesn't eliminate semantic risk — but it catches a class of errors that neither static analysis nor existing tests catch: <em>the code works differently, and nobody tested the difference</em>. <strong>Residual risk:</strong> regressions that auto-generated tests also miss. This is the genuine inherent limit. The solution narrows the gap from "anything tests miss" to "things even an adversarial test generator misses."<br><br>
+
+    <strong style="color:var(--mkt)">2. "Marketing content is good enough, not great"</strong><br>
+    <strong>Was:</strong> Gemini produces generic, competent content without brand voice.<br>
+    <strong style="color:var(--green)">Solution — Voice profile + few-shot examples + Claude editor pass:</strong><br>
+    Add a <span class="cmd">[voice]</span> section to each repo's TOML: <span class="cmd">tone = "technical but approachable"</span>, <span class="cmd">vocabulary = ["contributors", "community", "ship"]</span>, <span class="cmd">anti_patterns = ["leverage", "synergy", "excited to announce"]</span>, <span class="cmd">personality = "a senior engineer who writes clearly and hates fluff"</span>. During auto-discovery, Claude scrapes the repo's existing release notes, README tone, and past announcement style, then stores 3-5 <strong>golden examples</strong> in <span class="cmd">repos/{name}.voice.md</span>. Every marketing content generation call passes the voice profile + golden examples as few-shot context to Gemini. For high-stakes content (release announcements, contributor spotlights), add a <strong>Claude editor pass</strong>: Gemini drafts → Claude rewrites with voice profile as instruction. One extra Claude call transforms generic content into content that sounds like the repo's existing voice. Add a <strong>community feedback loop</strong>: track GitHub Discussions reaction counts and reply rates per post. Monthly, feed engagement metrics back into the voice profile: "Posts with direct, technical tone got 3× more engagement than generic announcements. Adjust accordingly." <strong>Residual limit:</strong> voice consistency improves over time via the feedback loop but starts imperfect. The golden examples bootstrap quality from day one; the feedback loop refines it.<br><br>
+
+    <strong style="color:var(--pm)">3. "PM analysis is pattern-matching, not product intuition"</strong><br>
+    <strong>Was:</strong> Claude analyzes GitHub data only. Cannot see outside the repo — no market context, no user sentiment beyond issues.<br>
+    <strong style="color:var(--green)">Solution — Domain knowledge file + external signal feeds + competitor tracking:</strong><br>
+    Each repo gets an optional <span class="cmd">KODO.md</span> — a one-time domain knowledge document written by the maintainer: product vision, target users, business model, strategic priorities, competitive landscape, domain glossary. Written once, updated occasionally. This is NOT per-PR human involvement — it's project-level context that Claude reads automatically in every PM analysis. Not different from writing a README: you do it once and it informs everything. Add a <span class="cmd">[signals]</span> section to repo TOML: RSS feeds for the domain, Stack Overflow tags, npm/PyPI download trends, competitor repo URLs. The scout checks these alongside GitHub: <span class="cmd">competitor_stars=$(gh api repos/{competitor}/--jq .stargazers_count)</span>, <span class="cmd">npm_downloads=$(curl -s "https://api.npmjs.org/downloads/point/last-week/{pkg}" | jq .downloads)</span>. The PM weekly report includes a <strong>competitive landscape</strong> section: "Competitor X released v3.0 last week (+400 stars). Their changelog mentions feature Y which aligns with our open issue #42." Add <strong>user sentiment mining</strong>: scrape GitHub Discussions, issue comments from non-team members, and Stack Overflow questions tagged with the project. Claude analyzes: "Users are repeatedly asking about feature Z but we have no issue for it." <strong>Residual limit:</strong> market intuition that exists nowhere in public data (private customer conversations, unspoken user frustration, strategic bets) remains inaccessible. The solution surfaces every signal that IS publicly available and currently ignored.<br><br>
+
+    <strong style="color:var(--green)">4. "GitHub-native, not universal"</strong><br>
+    <strong>Was:</strong> Only works with GitHub via <span class="cmd">gh</span> CLI.<br>
+    <strong style="color:var(--green)">Solution — Git provider adapter (<span class="cmd">kodo-git.sh</span>) + validated alternatives:</strong><br>
+    The scout and brain never call <span class="cmd">gh</span> directly. They call <span class="cmd">kodo-git.sh &lt;action&gt; &lt;repo&gt;</span>, which reads <span class="cmd">provider</span> from the repo TOML and routes to the correct CLI. <strong>GitHub:</strong> <span class="cmd">gh pr list</span>, <span class="cmd">gh issue list</span>, <span class="cmd">gh api</span> — full support. <strong>GitLab:</strong> <span class="cmd">glab</span> (official GitLab CLI, open source, supports MR list, issue management, CI pipelines, releases). Validated: glab supports non-interactive auth, MR/issue operations, and CI management. Some commands still have interactive prompt quirks in edge cases, but core operations work headless. <strong>Gitea/Forgejo:</strong> REST API via <span class="cmd">curl + jq</span> — Gitea exposes PR, issue, release, and repo endpoints with OpenAPI docs. <strong>Bitbucket:</strong> REST API v2 via <span class="cmd">curl + jq</span>. The adapter is ~50-80 lines per provider. The TOML gets: <span class="cmd">provider = "github" | "gitlab" | "gitea" | "bitbucket"</span> plus <span class="cmd">api_base</span> for self-hosted instances. <strong>Day-one support:</strong> GitHub + GitLab. <strong>Week-two:</strong> Gitea/Forgejo via API. <strong>Residual limit:</strong> provider-specific features (GitHub Discussions, GitLab epics) need per-provider SKILL.md extensions. The core dev/mkt/pm flows are provider-agnostic; advanced community features are not.<br><br>
+
+    <strong style="color:var(--amber)">5. "Confidence scores are uncalibrated"</strong><br>
+    <strong>Was:</strong> Initial bands are guesses. No data until the system runs for a while.<br>
+    <strong style="color:var(--green)">Solution — Bootstrap calibration + adaptive rolling window:</strong><br>
+    <strong>Phase 1 (shadow mode):</strong> During onboarding, replay the last 50 merged PRs through the confidence scoring system. For each: what would Kōdō have scored? Was that PR later reverted, hotfixed, or bug-reported? This gives a calibration dataset <em>before going live</em>. If the 90+ band shows a 15% incident rate on historical data, tighten to 95+ before launch. <strong>Phase 2 (live adaptive):</strong> Rolling 30-day window. Every merge outcome (clean, reverted, hotfixed) feeds the <span class="cmd">merge_outcomes</span> table. An exponential moving average per band updates thresholds automatically: <span class="cmd">UPDATE confidence_bands SET threshold = threshold + 2 WHERE band = '90+' AND incident_rate_30d > 0.10</span>. Bands tighten when incidents rise, loosen when the system proves accurate. No quarterly manual adjustment — continuous, data-driven, automatic. <strong>Phase 3 (cross-repo calibration):</strong> Repos with similar profiles (same language, similar test coverage, similar CI maturity) share calibration data. A well-calibrated TypeScript repo's bands inform initial thresholds for a new TypeScript repo. <strong>Residual limit:</strong> calibration precision depends on volume. A repo with 2 PRs/month won't generate enough data for reliable band adjustment for months. Cross-repo pooling helps but doesn't fully solve low-volume repos.<br><br>
+
+    <strong style="color:var(--blue)">6. "Claude down = degraded, survivable hours not days"</strong><br>
+    <strong>Was:</strong> Gemini fallback with capped confidence. Works but degrades decision quality.<br>
+    <strong style="color:var(--green)">Solution — Queue-and-replay + Codex emergency reviewer + hibernate mode:</strong><br>
+    <strong>Tier 1 (0-30 min):</strong> Brain detects Claude failure (non-zero exit / timeout / rate-limit error in JSON). Switches to <strong>Codex as emergency code reviewer</strong> — <span class="cmd">codex exec "Review this PR for correctness and security"</span>. Different model, genuinely independent review, not a weak substitute. Confidence capped at 79 (forces balloting). Marketing engine unaffected (Gemini-primary). PM triage continues via Qwen. <strong>Tier 2 (30 min - 4 hours):</strong> All Claude-requiring events queued to <span class="cmd">deferred_queue</span> table instead of running with substitutes. Dev engine: only deps-automerge with green CI. Marketing engine: continues normally. PM engine: Qwen-only triage. The queue accumulates but nothing risky executes. <strong>Tier 3 (4+ hours):</strong> <strong>Hibernate.</strong> All engines except scout go quiet. Scout keeps detecting and queueing. No merges, no content, no analysis. System is silent, not making degraded decisions. Telegram: "Kōdō hibernating — Claude unavailable > 4h." <strong>Recovery:</strong> When Claude returns (detected via <span class="cmd">claude -p "ping" --max-turns 1</span> with exponential backoff: 1m, 2m, 4m, 8m, 16m, cap 30m), drain the deferred queue in chronological order. Telegram: "Kōdō recovered — processing {n} queued events." <strong>Residual limit:</strong> during hibernate, external contributors get no instant response. Repos appear unmaintained for the duration. Mitigation: the scout can post a static "we're experiencing delays, we'll respond shortly" comment using pure bash + <span class="cmd">gh</span> (no LLM needed) on new PRs/issues during hibernate.<br><br>
+
+    <strong style="color:var(--dim)">7. "System size was dishonestly reported"</strong><br>
+    <strong>Was:</strong> I kept underreporting line counts. 235 → 350 → "actually ~1,100."<br>
+    <strong style="color:var(--green)">Solution — Honest inventory with real comparison:</strong><br>
+    <strong>Executable bash:</strong> ~400 lines across 10 scripts (scout, brain, 3 domain engines, transition, weekly, status, add, git-adapter). <strong>Behavioral specification:</strong> ~800 lines of markdown (4 context files + 7 SKILL.md files). <strong>Config schemas:</strong> ~150 lines of JSON Schema (4 files). <strong>Per-repo overhead:</strong> ~30 lines TOML (auto-generated) + optional KODO.md + optional voice.md. <strong>Total system:</strong> ~1,350 lines of structured content. <strong>For perspective:</strong> a typical equivalent TypeScript orchestrator would be 3,000+ lines with build tooling, framework dependencies, and plugin architecture. Kōdō achieves 3× the feature scope (three domains vs one) in 55% fewer lines because the CLIs are the implementation — the specs just tell them what to do. No build step, no framework, deploys with <span class="cmd">git clone + crontab</span>.
+  </div>
+</div>
+
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+mermaid.initialize({
+  startOnLoad:true,theme:'dark',
+  themeVariables:{
+    primaryColor:'#f43f5e',primaryTextColor:'#e2e8f0',primaryBorderColor:'#141827',
+    lineColor:'#a78bfa',secondaryColor:'#141827',tertiaryColor:'#0a0c13',
+    fontFamily:'JetBrains Mono, monospace',fontSize:'11px',
+    noteBkgColor:'#141827',noteTextColor:'#e2e8f0',noteBorderColor:'#a78bfa',
+    actorBkg:'#0a0c13',actorTextColor:'#e2e8f0',actorBorder:'#f43f5e',
+    signalColor:'#e2e8f0',labelBoxBkgColor:'#0a0c13',labelTextColor:'#e2e8f0',
+    sectionBkgColor:'#0a0c13',sectionBkgColor2:'#141827',altSectionBkgColor:'#0a0c13',
+    pie1:'#f43f5e',pie2:'#10b981',pie3:'#22d3ee',pie4:'#a78bfa',pie5:'#f59e0b',pie6:'#64748b',
+  },
+  flowchart:{curve:'basis',htmlLabels:true},
+  sequence:{mirrorActors:false,messageMargin:28},
+});
+</script>
+</body>
+</html>
