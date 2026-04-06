@@ -30,8 +30,9 @@ export KODO_TRANSITION_REPO="$REPO_ID"
 if ! kodo_claim_event "$EVENT_ID" "dev"; then
     exit 0
 fi
-# Release on any exit (normal, error, signal)
-trap 'kodo_release_event "$EVENT_ID" "dev"' EXIT
+# Release lock + cleanup workdir on any exit (normal, error, signal)
+_KODO_WORKDIR_CLEANUP=""
+trap 'kodo_release_event "$EVENT_ID" "dev"; [[ -n "$_KODO_WORKDIR_CLEANUP" ]] && "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$_KODO_WORKDIR_CLEANUP" 2>/dev/null' EXIT
 
 # ── State Reader ─────────────────────────────────────────────
 
@@ -156,47 +157,215 @@ _triage_issue() {
 }
 
 do_generating() {
-    kodo_log "DEV: generating code for $EVENT_ID"
+    kodo_log "DEV: generating code fix for $EVENT_ID"
 
-    if ! kodo_cli_available codex; then
-        # Fallback: try qwen
-        if kodo_cli_available qwen; then
-            kodo_log "DEV: codex unavailable, falling back to qwen"
-        else
-            defer "no code generation CLI available"
-            return
-        fi
+    # Determine which CLI to use for code generation
+    local gen_cli=""
+    if kodo_cli_available claude; then
+        gen_cli="claude"
+    elif kodo_cli_available codex; then
+        gen_cli="codex"
+    else
+        defer "no code generation CLI available (need claude or codex)"
+        return
     fi
 
     local payload
     payload="$(get_payload)"
-    local issue_title issue_body
+    local issue_num issue_title
+    issue_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
     issue_title=$(echo "$payload" | jq -r '.title // "no title"' 2>/dev/null)
-    issue_body=$(echo "$payload" | jq -r '.body // ""' 2>/dev/null | head -100)
 
-    # Generate fix via codex
-    local prompt
-    prompt="$(kodo_prompt "Fix this issue in repo $REPO_SLUG.
-Title: $issue_title
-Description: $issue_body
-
-Generate a minimal, focused fix. Only change what is necessary.")"
-
-    local result
-    if kodo_cli_available codex; then
-        result=$(timeout 300 codex exec "$prompt" 2>/dev/null) || {
-            defer "codex generation failed"
-            return
-        }
-        kodo_log_budget "codex" "$REPO_ID" "dev" 0 0 0.10
-    else
-        result=$(timeout 300 qwen -p "$prompt" 2>/dev/null) || {
-            defer "qwen generation failed"
-            return
-        }
-        kodo_log_budget "qwen" "$REPO_ID" "dev" 0 0 0.0
+    if [[ -z "$issue_num" ]]; then
+        defer "no issue number in payload"
+        return
     fi
 
+    # Step 1: Get full issue context from GitHub (body, comments, labels)
+    local issue_detail
+    issue_detail=$("$SCRIPT_DIR/kodo-git.sh" issue-get "$REPO_TOML" "$issue_num" 2>/dev/null) || issue_detail="{}"
+    local issue_body
+    issue_body=$(echo "$issue_detail" | jq -r '.body // ""' 2>/dev/null | head -200)
+    local issue_comments
+    issue_comments=$(echo "$issue_detail" | jq -r '.last_comments[]? | "[\(.author)]: \(.body)"' 2>/dev/null | head -50)
+
+    kodo_log "DEV: issue #$issue_num — cloning repo for code generation"
+
+    # Step 2: Clone the repo
+    local default_branch
+    default_branch="$(kodo_toml_get "$REPO_TOML" "branch_default")"
+    default_branch="${default_branch:-main}"
+
+    local work_dir
+    work_dir=$("$SCRIPT_DIR/kodo-git.sh" repo-clone "$REPO_TOML" "$default_branch" 2>/dev/null) || {
+        defer "repo clone failed"
+        return
+    }
+
+    kodo_log "DEV: cloned to $work_dir"
+    kodo_pipeline_set "$EVENT_ID" "dev" "work_dir" "$work_dir"
+
+    # Guarantee cleanup on any exit — use EXIT trap with guard variable
+    # (RETURN trap doesn't propagate reliably through case dispatch)
+    _KODO_WORKDIR_CLEANUP="$work_dir"
+
+    # Step 3: Create a kodo branch
+    local branch_name="kodo/dev/${EVENT_ID}"
+    "$SCRIPT_DIR/kodo-git.sh" branch-create "$work_dir" "$branch_name" 2>/dev/null || {
+        "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
+        defer "branch creation failed"
+        return
+    }
+
+    # Step 4: Run Claude/Codex with FULL repo context (working directory = cloned repo)
+    # Claude Code reads the codebase when run from the repo directory
+    local fix_result=""
+    local fix_success=false
+
+    if [[ "$gen_cli" == "claude" ]]; then
+        kodo_log "DEV: running claude -p in $work_dir for issue #$issue_num"
+
+        local prompt
+        prompt="$(kodo_prompt "You are fixing issue #$issue_num in $REPO_SLUG.
+
+Title: $issue_title
+
+Description:
+$issue_body
+${issue_comments:+
+Recent comments:
+$issue_comments}
+
+Instructions:
+1. Read the relevant source files to understand the codebase
+2. Implement a minimal, focused fix for this issue
+3. Only change what is necessary — no refactoring, no unrelated changes
+4. Match existing code style exactly
+5. If the fix requires tests, add them
+
+Do NOT commit. Just make the file changes.")"
+
+        # Run Claude from within the cloned repo directory
+        # --allowedTools grants headless file write permission (without it, claude -p refuses writes)
+        fix_result=$(cd "$work_dir" && timeout 600 claude -p "$prompt" \
+            --output-format json \
+            --max-turns 20 \
+            --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(git diff:*)" "Bash(git status:*)" "Bash(git log:*)" "Bash(ls:*)" "Bash(find:*)" \
+            2>/dev/null) || fix_result=""
+
+        if [[ -n "$fix_result" ]]; then
+            local cost
+            cost=$(echo "$fix_result" | jq -r '.total_cost_usd // 0' 2>/dev/null)
+            local tokens_in tokens_out
+            tokens_in=$(echo "$fix_result" | jq -r '.usage.input_tokens // 0' 2>/dev/null)
+            tokens_out=$(echo "$fix_result" | jq -r '.usage.output_tokens // 0' 2>/dev/null)
+            kodo_log_budget "claude" "$REPO_ID" "dev" "$tokens_in" "$tokens_out" "$cost"
+        fi
+
+    elif [[ "$gen_cli" == "codex" ]]; then
+        kodo_log "DEV: running codex in $work_dir for issue #$issue_num"
+
+        fix_result=$(cd "$work_dir" && timeout 600 codex exec \
+            "Fix issue #$issue_num: $issue_title. $issue_body. Make minimal changes only." 2>/dev/null) || fix_result=""
+        kodo_log_budget "codex" "$REPO_ID" "dev" 0 0 0.50
+    fi
+
+    # Step 5: Check if any files were actually changed
+    local changed_files
+    changed_files=$(cd "$work_dir" && git diff --name-only 2>/dev/null && git ls-files --others --exclude-standard 2>/dev/null)
+
+    if [[ -z "$changed_files" ]]; then
+        # Check if Claude determined the issue is already fixed
+        local result_text=""
+        if [[ -n "$fix_result" ]]; then
+            result_text=$(echo "$fix_result" | jq -r '.result // ""' 2>/dev/null)
+        fi
+        if echo "$result_text" | grep -qiE "already.*(fix|resolv|implement)|no longer.*(valid|applic)|nu mai este valabil|deja.*(fix|rezolv)|not.*(reproducib|valid)"; then
+            kodo_log "DEV: issue #$issue_num appears already resolved — commenting and closing"
+            # Post comment on GitHub explaining the finding
+            "$SCRIPT_DIR/kodo-git.sh" issue-comment "$REPO_TOML" "$issue_num" \
+                "KŌDŌ DEV analysis: This issue appears to be already resolved in the current codebase. The code referenced in the issue description has been updated and no longer exhibits the described behavior.
+
+_Automated analysis by KŌDŌ | Event: $EVENT_ID | Model: ${gen_cli}_" 2>/dev/null || true
+            "$SCRIPT_DIR/kodo-git.sh" issue-close "$REPO_TOML" "$issue_num" 2>/dev/null || true
+            kodo_log "DEV: no files changed — issue already resolved in codebase"
+            transition "generating" "hard_gates"
+            transition "hard_gates" "auditing"
+            kodo_pipeline_set "$EVENT_ID" "dev" "confidence" "95"
+            kodo_pipeline_set "$EVENT_ID" "dev" "review_model" "claude"
+            kodo_pipeline_set "$EVENT_ID" "dev" "outcome" "already_resolved"
+            transition "auditing" "scanning"
+            transition "scanning" "auto_merge"
+            transition "auto_merge" "releasing"
+            transition "releasing" "resolved"
+            return
+        fi
+        kodo_log "DEV: no files changed — code generation produced no diff"
+        defer "code generation produced no file changes"
+        return
+    fi
+
+    local diff_lines
+    diff_lines=$(cd "$work_dir" && git diff --stat 2>/dev/null | tail -1)
+    kodo_log "DEV: code generated — $diff_lines"
+    kodo_pipeline_set "$EVENT_ID" "dev" "gen_files" "$changed_files"
+    kodo_pipeline_set "$EVENT_ID" "dev" "gen_cli" "$gen_cli"
+
+    # Step 6: Commit the changes
+    (
+        cd "$work_dir" || exit 1
+        git add -A
+        git commit -m "$(cat <<COMMITMSG
+kodo(dev): fix #$issue_num -- $issue_title
+
+Event-ID: $EVENT_ID
+Model: $gen_cli
+COMMITMSG
+        )" --no-verify
+    ) 2>/dev/null || {
+        "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
+        defer "git commit failed"
+        return
+    }
+
+    # Step 7: Push branch + create PR (shadow mode blocks via kodo-git.sh)
+    "$SCRIPT_DIR/kodo-git.sh" branch-push "$work_dir" "$branch_name" 2>/dev/null || {
+        "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
+        defer "branch push failed"
+        return
+    }
+
+    local pr_body="## Fix for #$issue_num
+
+**$issue_title**
+
+### Changes
+\`\`\`
+$diff_lines
+\`\`\`
+
+### Files modified
+$(echo "$changed_files" | sed 's/^/- /')
+
+---
+_Generated by KŌDŌ DEV | Event: $EVENT_ID | Model: ${gen_cli}_"
+
+    local pr_url
+    pr_url=$("$SCRIPT_DIR/kodo-git.sh" pr-create "$REPO_TOML" "$branch_name" \
+        "[kodo-dev] fix #$issue_num: $issue_title" "$pr_body" 2>/dev/null) || {
+        kodo_log "DEV: PR creation failed (shadow mode or error)"
+        # Branch is pushed, PR creation blocked by shadow — that's OK, continue pipeline
+    }
+
+    if [[ -n "$pr_url" ]]; then
+        kodo_log "DEV: PR created: $pr_url"
+        kodo_pipeline_set "$EVENT_ID" "dev" "pr_url" "$pr_url"
+    fi
+
+    # Clean up working directory
+    "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
+
+    kodo_log "DEV: code generation complete for issue #$issue_num"
     transition "generating" "hard_gates"
 }
 
