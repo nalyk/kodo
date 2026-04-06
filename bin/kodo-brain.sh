@@ -189,11 +189,11 @@ main() {
         done <<< "$events"
     fi
 
-    # Phase 2: Advance events stuck in intermediate states
+    # Phase 2: Advance events stuck in intermediate states (including orphaned pending)
     # Re-dispatch engines for events that need further processing
     local stalled
     stalled=$(kodo_sql "SELECT event_id, repo, domain, state FROM pipeline_state
-        WHERE state NOT IN ('pending', 'resolved', 'closed', 'published', 'reported', 'deferred')
+        WHERE state NOT IN ('resolved', 'closed', 'published', 'reported', 'deferred')
         AND (processing_pid IS NULL OR processing_pid = 0)
         AND updated_at < datetime('now', '-5 seconds')
         ORDER BY updated_at ASC LIMIT 15;")
@@ -219,6 +219,50 @@ main() {
             "$engine_script" "$event_id" "$toml" "$domain" >> "$KODO_LOG_DIR/${domain}.log" 2>&1 &
 
         done <<< "$stalled"
+    fi
+
+    # Phase 3: Retry deferred events (deferred → pending, max 2 retries)
+    # Events deferred due to transient failures (CI pending, CLI timeout, rate limits)
+    # get a second chance. Permanent failures (max retries) auto-close.
+    local deferred
+    deferred=$(kodo_sql "SELECT event_id, repo, domain, retry_count FROM pipeline_state
+        WHERE state = 'deferred'
+        AND (processing_pid IS NULL OR processing_pid = 0)
+        AND updated_at < datetime('now', '-5 minutes')
+        ORDER BY updated_at ASC LIMIT 5;")
+
+    if [[ -n "$deferred" ]]; then
+        while IFS='|' read -r event_id repo domain retry_count; do
+            [[ -z "$event_id" ]] && continue
+
+            local toml="$KODO_HOME/repos/${repo}.toml"
+            [[ ! -f "$toml" ]] && continue
+
+            export KODO_TRANSITION_REPO="$repo"
+
+            if [[ "$retry_count" -ge 2 ]]; then
+                # Max retries exhausted — auto-close
+                kodo_log "BRAIN: $event_id [$domain] max retries ($retry_count) — closing"
+                "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "deferred" "closed" "$domain" 2>&1 || true
+            else
+                # Retry: deferred → pending (transition increments retry_count)
+                kodo_log "BRAIN: retrying $event_id [$domain] (attempt $((retry_count + 1))/2)"
+                "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "deferred" "pending" "$domain" 2>&1 || true
+
+                # Re-dispatch engine for the now-pending event
+                local engine_script
+                case "$domain" in
+                    dev) engine_script="$SCRIPT_DIR/kodo-dev.sh" ;;
+                    mkt) engine_script="$SCRIPT_DIR/kodo-mkt.sh" ;;
+                    pm)  engine_script="$SCRIPT_DIR/kodo-pm.sh" ;;
+                    *)   continue ;;
+                esac
+                if [[ -x "$engine_script" ]]; then
+                    "$engine_script" "$event_id" "$toml" "$domain" >> "$KODO_LOG_DIR/${domain}.log" 2>&1 &
+                fi
+            fi
+
+        done <<< "$deferred"
     fi
 
     kodo_log "BRAIN: processed $processed new events"
