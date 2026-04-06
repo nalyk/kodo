@@ -572,8 +572,8 @@ do_auto_merge() {
     confidence=$(kodo_pipeline_get "$EVENT_ID" "dev" "confidence")
     confidence="${confidence:-90}"
 
-    _check_ci_and_merge "$pr_num" "auto_merge"
-    local ci_result=$?
+    local ci_result=0
+    _check_ci_and_merge "$pr_num" "auto_merge" || ci_result=$?
 
     case "$ci_result" in
         0)  # Success — record clean merge
@@ -619,8 +619,8 @@ do_guarded_merge() {
         fi
     fi
 
-    _check_ci_and_merge "$pr_num" "guarded_merge"
-    local ci_result=$?
+    local ci_result=0
+    _check_ci_and_merge "$pr_num" "guarded_merge" || ci_result=$?
 
     case "$ci_result" in
         0)  kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
