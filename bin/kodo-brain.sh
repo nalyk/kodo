@@ -136,7 +136,7 @@ dispatch_engine() {
     # Create pipeline state (with payload for engines to read)
     export KODO_TRANSITION_REPO="$repo"
     export KODO_TRANSITION_PAYLOAD="$payload"
-    if ! "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "*" "pending" "$domain" 2>&1; then
+    if ! "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "*" "pending" "$domain" >> "$KODO_LOG_DIR/${domain}.log" 2>&1; then
         kodo_log "BRAIN: FAILED to create pipeline state for $event_id [$domain] — event stays in pending"
         return 1
     fi

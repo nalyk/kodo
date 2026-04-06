@@ -218,17 +218,16 @@ kodo_claim_event() {
     eid="$(kodo_sql_escape "$event_id")"
     dom="$(kodo_sql_escape "$domain")"
 
-    # Atomic claim: only succeed if processing_pid is NULL or stale
-    # First, clear stale PIDs (process no longer running)
-    # Atomic claim: UPDATE only if unclaimed or owned by dead process
-    # Step 1: try claiming NULL pid (common case, no race)
-    kodo_sql "UPDATE pipeline_state
+    # Atomic claim: UPDATE + changes() in single sqlite3 invocation
+    # (changes() only works within the same connection)
+    # Step 1: try claiming NULL/self pid (common case, no race)
+    local rows_changed
+    rows_changed=$(sqlite3 -cmd ".timeout 5000" "$KODO_DB" "
+        UPDATE pipeline_state
         SET processing_pid = ${my_pid}, updated_at = datetime('now')
         WHERE event_id = '${eid}' AND domain = '${dom}'
-        AND (processing_pid IS NULL OR processing_pid = ${my_pid});"
-
-    local rows_changed
-    rows_changed=$(kodo_sql "SELECT changes();")
+        AND (processing_pid IS NULL OR processing_pid = ${my_pid});
+        SELECT changes();")
 
     if [[ "${rows_changed:-0}" -gt 0 ]]; then
         kodo_log "LOCK: $event_id [$domain] claimed by PID $my_pid"
@@ -245,14 +244,15 @@ kodo_claim_event() {
             kodo_log "LOCK: $event_id [$domain] owned by PID $current_pid (alive) — skipping"
             return 1
         fi
-        # Dead PID — reclaim atomically
+        # Dead PID — reclaim atomically (single connection)
         kodo_log "LOCK: $event_id [$domain] stale PID $current_pid (dead) — reclaiming"
-        kodo_sql "UPDATE pipeline_state
+        rows_changed=$(sqlite3 -cmd ".timeout 5000" "$KODO_DB" "
+            UPDATE pipeline_state
             SET processing_pid = ${my_pid}, updated_at = datetime('now')
             WHERE event_id = '${eid}' AND domain = '${dom}'
-            AND processing_pid = '$(kodo_sql_escape "$current_pid")';"
+            AND processing_pid = '$(kodo_sql_escape "$current_pid")';
+            SELECT changes();")
 
-        rows_changed=$(kodo_sql "SELECT changes();")
         if [[ "${rows_changed:-0}" -gt 0 ]]; then
             kodo_log "LOCK: $event_id [$domain] reclaimed by PID $my_pid"
             return 0

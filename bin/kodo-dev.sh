@@ -30,9 +30,10 @@ export KODO_TRANSITION_REPO="$REPO_ID"
 if ! kodo_claim_event "$EVENT_ID" "dev"; then
     exit 0
 fi
-# Release lock + cleanup workdir on any exit (normal, error, signal)
+# Release lock + cleanup workdir + temp files on any exit (normal, error, signal)
 _KODO_WORKDIR_CLEANUP=""
-trap 'kodo_release_event "$EVENT_ID" "dev"; [[ -n "$_KODO_WORKDIR_CLEANUP" ]] && "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$_KODO_WORKDIR_CLEANUP" 2>/dev/null' EXIT
+_KODO_TMPFILES=()
+trap 'kodo_release_event "$EVENT_ID" "dev"; [[ -n "$_KODO_WORKDIR_CLEANUP" ]] && "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$_KODO_WORKDIR_CLEANUP" 2>/dev/null; for _f in "${_KODO_TMPFILES[@]}"; do rm -rf "$_f" 2>/dev/null; done' EXIT
 
 # ── State Reader ─────────────────────────────────────────────
 
@@ -254,7 +255,7 @@ Do NOT commit. Just make the file changes.")"
         # Run Claude from within the cloned repo directory
         # --allowedTools grants headless file write permission (without it, claude -p refuses writes)
         local gen_stderr
-        gen_stderr=$(mktemp)
+        gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
         fix_result=$(cd "$work_dir" && timeout 600 claude -p "$prompt" \
             --output-format json \
             --max-turns 20 \
@@ -278,7 +279,7 @@ Do NOT commit. Just make the file changes.")"
         kodo_log "DEV: running codex in $work_dir for issue #$issue_num"
 
         local gen_stderr
-        gen_stderr=$(mktemp)
+        gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
         fix_result=$(cd "$work_dir" && timeout 600 codex exec \
             "Fix issue #$issue_num: $issue_title. $issue_body. Make minimal changes only." 2>"$gen_stderr") || {
             kodo_log "DEV: codex code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
@@ -346,7 +347,7 @@ _Automated analysis by KŌDŌ | Event: $EVENT_ID | Model: ${gen_cli}_" 2>/dev/nu
 
     # Step 6: Commit the changes
     local git_stderr
-    git_stderr=$(mktemp)
+    git_stderr=$(mktemp); _KODO_TMPFILES+=("$git_stderr")
     (
         cd "$work_dir" || exit 1
         git add -A
@@ -659,8 +660,7 @@ Review the change for correctness, security, and safety. Cast your vote.")"
 
     # Collect structured votes in PARALLEL — all 3 CLIs run concurrently
     local vote_dir
-    vote_dir=$(mktemp -d)
-    trap 'rm -rf "$vote_dir"' RETURN
+    vote_dir=$(mktemp -d); _KODO_TMPFILES+=("$vote_dir")
 
     _cast_ballot() {
         local cli="$1" outfile="$vote_dir/$cli.json"
