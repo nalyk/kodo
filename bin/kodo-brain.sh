@@ -194,6 +194,7 @@ main() {
     local stalled
     stalled=$(kodo_sql "SELECT event_id, repo, domain, state FROM pipeline_state
         WHERE state NOT IN ('pending', 'resolved', 'closed', 'published', 'reported', 'deferred')
+        AND (processing_pid IS NULL OR processing_pid = 0)
         AND updated_at < datetime('now', '-5 seconds')
         ORDER BY updated_at ASC LIMIT 15;")
 

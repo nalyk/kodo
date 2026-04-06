@@ -54,6 +54,25 @@ _gh_pr_merge() {
     gh pr merge "$pr_num" --repo "$slug" --merge --auto
 }
 
+# Check CI status for a PR
+# gh pr checks uses: state = PENDING | SUCCESS | FAILURE | CANCELLED | ERROR | EXPECTED | NEUTRAL | STALE | SKIPPED
+_gh_pr_checks() {
+    local slug="$1" pr_num="$2"
+    gh pr checks "$pr_num" --repo "$slug" --json name,state,bucket 2>/dev/null | jq -c '{
+        total: length,
+        pass: [.[] | select(.bucket == "pass")] | length,
+        fail: [.[] | select(.bucket == "fail")] | length,
+        pending: [.[] | select(.bucket == "pending")] | length,
+        state: (
+            if length == 0 then "NO_CHECKS"
+            elif ([.[] | select(.bucket == "fail")] | length) > 0 then "FAILURE"
+            elif ([.[] | select(.bucket == "pending")] | length) > 0 then "PENDING"
+            else "SUCCESS"
+            end
+        )
+    }'
+}
+
 _gh_pr_diff() {
     local slug="$1" pr_num="$2"
     gh pr diff "$pr_num" --repo "$slug"
@@ -210,6 +229,7 @@ main() {
                 pr-list)            _gh_pr_list "$slug" ;;
                 pr-comment)         _gh_pr_comment "$slug" "$@" ;;
                 pr-merge)           _gh_pr_merge "$slug" "$@" ;;
+                pr-checks)          _gh_pr_checks "$slug" "$@" ;;
                 pr-diff)            _gh_pr_diff "$slug" "$@" ;;
                 issue-list)         _gh_issue_list "$slug" ;;
                 issue-comment)      _gh_issue_comment "$slug" "$@" ;;

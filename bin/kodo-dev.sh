@@ -25,6 +25,14 @@ readonly REPO_ID="$(kodo_repo_id "$REPO_TOML")"
 readonly REPO_SLUG="$(kodo_repo_slug "$REPO_TOML")"
 export KODO_TRANSITION_REPO="$REPO_ID"
 
+# ── Concurrent Processing Guard ─────────────────────────────
+# Claim this event atomically. Exit if another engine owns it.
+if ! kodo_claim_event "$EVENT_ID" "dev"; then
+    exit 0
+fi
+# Release on any exit (normal, error, signal)
+trap 'kodo_release_event "$EVENT_ID" "dev"' EXIT
+
 # ── State Reader ─────────────────────────────────────────────
 
 get_state() {
@@ -499,6 +507,55 @@ Review the change for correctness, security, and safety. Cast your vote.")"
     fi
 }
 
+# ── CI-Aware Merge ──────────────────────────────────────────
+# Shared CI check logic used by both auto_merge and guarded_merge.
+# Returns: 0=green (merge), 1=pending (yield, Brain re-dispatches later), 2=red (defer)
+
+_check_ci_and_merge() {
+    local pr_num="$1" merge_type="$2"
+
+    # Check CI status via kodo-git.sh
+    local ci_status
+    ci_status=$("$SCRIPT_DIR/kodo-git.sh" pr-checks "$REPO_TOML" "$pr_num" 2>/dev/null) || ci_status=""
+
+    if [[ -n "$ci_status" ]]; then
+        local ci_state ci_pass ci_fail ci_pending ci_total
+        ci_state=$(echo "$ci_status" | jq -r '.state' 2>/dev/null)
+        ci_pass=$(echo "$ci_status" | jq -r '.pass' 2>/dev/null)
+        ci_fail=$(echo "$ci_status" | jq -r '.fail' 2>/dev/null)
+        ci_pending=$(echo "$ci_status" | jq -r '.pending' 2>/dev/null)
+        ci_total=$(echo "$ci_status" | jq -r '.total' 2>/dev/null)
+
+        kodo_log "DEV: CI for PR #$pr_num — $ci_state (pass:$ci_pass fail:$ci_fail pending:$ci_pending/$ci_total)"
+        kodo_pipeline_set "$EVENT_ID" "dev" "ci_state" "$ci_state"
+        kodo_pipeline_set "$EVENT_ID" "dev" "ci_checks_total" "$ci_total"
+
+        case "$ci_state" in
+            FAILURE)
+                kodo_log "DEV: CI FAILED — not merging PR #$pr_num"
+                return 2
+                ;;
+            PENDING)
+                kodo_log "DEV: CI pending ($ci_pending/$ci_total) — yielding, will retry"
+                return 1
+                ;;
+            NO_CHECKS)
+                kodo_log "DEV: no CI checks configured — proceeding with $merge_type"
+                ;;
+            SUCCESS)
+                kodo_log "DEV: CI green ($ci_pass/$ci_total) — proceeding with $merge_type"
+                ;;
+        esac
+    fi
+
+    # CI green or no checks → merge
+    "$SCRIPT_DIR/kodo-git.sh" pr-merge "$REPO_TOML" "$pr_num" 2>/dev/null || {
+        return 2
+    }
+
+    return 0
+}
+
 do_auto_merge() {
     kodo_log "DEV: auto-merging $EVENT_ID"
 
@@ -511,16 +568,26 @@ do_auto_merge() {
         return
     fi
 
-    "$SCRIPT_DIR/kodo-git.sh" pr-merge "$REPO_TOML" "$pr_num" 2>/dev/null || {
-        defer "merge failed"
-        return
-    }
+    local confidence
+    confidence=$(kodo_pipeline_get "$EVENT_ID" "dev" "confidence")
+    confidence="${confidence:-90}"
 
-    # Record merge outcome
-    kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
-        VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', 90, 'clean');"
+    _check_ci_and_merge "$pr_num" "auto_merge"
+    local ci_result=$?
 
-    transition "auto_merge" "releasing"
+    case "$ci_result" in
+        0)  # Success — record clean merge
+            kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
+                VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'clean');"
+            transition "auto_merge" "releasing"
+            ;;
+        1)  # CI pending — don't transition, let Brain re-dispatch later
+            kodo_log "DEV: auto_merge waiting for CI — engine yielding"
+            ;;
+        2)  # CI failed or merge failed
+            defer "CI failed or merge rejected for PR #$pr_num"
+            ;;
+    esac
 }
 
 do_guarded_merge() {
@@ -535,16 +602,36 @@ do_guarded_merge() {
         return
     fi
 
-    # Merge with CI check
-    "$SCRIPT_DIR/kodo-git.sh" pr-merge "$REPO_TOML" "$pr_num" 2>/dev/null || {
-        defer "guarded merge failed"
-        return
-    }
+    local confidence
+    confidence=$(kodo_pipeline_get "$EVENT_ID" "dev" "confidence")
+    confidence="${confidence:-75}"
 
-    kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
-        VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', 75, 'clean');"
+    # Check 48h window (guarded merge timeout)
+    local created_at
+    created_at=$(kodo_sql "SELECT created_at FROM pipeline_state
+        WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND domain = 'dev';")
+    if [[ -n "$created_at" ]]; then
+        local age_hours
+        age_hours=$(kodo_sql "SELECT CAST((julianday('now') - julianday('$created_at')) * 24 AS INTEGER);")
+        if [[ "$age_hours" -gt 48 ]]; then
+            defer "guarded merge timeout: $age_hours hours > 48h window"
+            return
+        fi
+    fi
 
-    transition "guarded_merge" "releasing"
+    _check_ci_and_merge "$pr_num" "guarded_merge"
+    local ci_result=$?
+
+    case "$ci_result" in
+        0)  kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
+                VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'clean');"
+            transition "guarded_merge" "releasing"
+            ;;
+        1)  kodo_log "DEV: guarded_merge waiting for CI — engine yielding"
+            ;;
+        2)  defer "CI failed or merge rejected for PR #$pr_num"
+            ;;
+    esac
 }
 
 do_releasing() {

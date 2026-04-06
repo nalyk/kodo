@@ -11,15 +11,16 @@ CREATE TABLE IF NOT EXISTS pending_events (
 );
 
 CREATE TABLE IF NOT EXISTS pipeline_state (
-    event_id      TEXT NOT NULL,
-    repo          TEXT NOT NULL,
-    domain        TEXT NOT NULL CHECK (domain IN ('dev', 'mkt', 'pm')),
-    state         TEXT NOT NULL DEFAULT 'pending',
-    payload_json  TEXT NOT NULL DEFAULT '{}',
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    retry_count   INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    event_id       TEXT NOT NULL,
+    repo           TEXT NOT NULL,
+    domain         TEXT NOT NULL CHECK (domain IN ('dev', 'mkt', 'pm')),
+    state          TEXT NOT NULL DEFAULT 'pending',
+    payload_json   TEXT NOT NULL DEFAULT '{}',
+    metadata_json  TEXT NOT NULL DEFAULT '{}',
+    processing_pid INTEGER DEFAULT NULL,
+    retry_count    INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (event_id, domain)
 );
 

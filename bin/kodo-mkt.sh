@@ -24,6 +24,12 @@ readonly REPO_ID="$(kodo_repo_id "$REPO_TOML")"
 readonly REPO_SLUG="$(kodo_repo_slug "$REPO_TOML")"
 export KODO_TRANSITION_REPO="$REPO_ID"
 
+# Concurrent processing guard
+if ! kodo_claim_event "$EVENT_ID" "mkt"; then
+    exit 0
+fi
+trap 'kodo_release_event "$EVENT_ID" "mkt"' EXIT
+
 # ── Helpers ──────────────────────────────────────────────────
 
 get_state() {

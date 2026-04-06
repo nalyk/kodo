@@ -57,16 +57,62 @@ kodo_is_shadow() {
     [[ "$mode" == "shadow" ]]
 }
 
+# ── Budget Enforcement ───────────────────────────────────────
+# Hard limits per model (monthly). Checked before every LLM invocation.
+# Alert at 80% via Telegram. Hard-block at 100%.
+
+declare -A KODO_BUDGET_LIMITS=(
+    ["claude"]=200
+    ["codex"]=20
+    ["gemini"]=0
+    ["qwen"]=0
+)
+
+# Get monthly spend for a model
+# Usage: kodo_get_spend <model>
+kodo_get_spend() {
+    local model="$1"
+    kodo_sql "SELECT COALESCE(SUM(cost_usd), 0.0)
+        FROM budget_ledger
+        WHERE model = '${model//\'/\'\'}' AND invoked_at > date('now', 'start of month');"
+}
+
 # Check monthly budget for a model
-# Usage: kodo_check_budget <model> <limit_usd>
 # Returns 0 if within budget, 1 if exceeded
 kodo_check_budget() {
-    local model="$1" limit="$2"
+    local model="$1" limit="${2:-}"
+    # Use explicit limit or look up from defaults
+    if [[ -z "$limit" ]]; then
+        limit="${KODO_BUDGET_LIMITS[$model]:-0}"
+    fi
+    # Free-tier models always pass
+    if [[ "$limit" == "0" ]]; then
+        return 0
+    fi
     local spent
-    spent=$(kodo_sql "SELECT COALESCE(SUM(cost_usd), 0.0)
-        FROM budget_ledger
-        WHERE model = '${model//\'/\'\'}' AND invoked_at > date('now', 'start of month');")
-    awk "BEGIN { exit ($spent >= $limit) ? 1 : 0 }"
+    spent=$(kodo_get_spend "$model")
+    # Alert at 80%
+    local threshold
+    threshold=$(awk "BEGIN { printf \"%.2f\", $limit * 0.80 }")
+    if awk "BEGIN { exit ($spent >= $threshold && $spent < $limit) ? 0 : 1 }" 2>/dev/null; then
+        # Only alert once per day (check deferred_queue for today's alert)
+        local alert_exists
+        alert_exists=$(kodo_sql "SELECT COUNT(*) FROM deferred_queue
+            WHERE event_id = 'budget-alert-${model}' AND queued_at > date('now');")
+        if [[ "$alert_exists" -eq 0 ]]; then
+            kodo_log "BUDGET: ⚠ $model at \$${spent}/\$${limit} ($(awk "BEGIN { printf \"%.0f\", ($spent/$limit)*100 }")%)"
+            kodo_send_telegram "⚠ KŌDŌ Budget Alert: *${model}* at \$${spent}/\$${limit} this month"
+            kodo_sql "INSERT INTO deferred_queue (event_id, repo, domain, reason)
+                VALUES ('budget-alert-${model}', 'system', 'dev', 'budget alert sent');"
+        fi
+    fi
+    # Hard block at 100%
+    if awk "BEGIN { exit ($spent >= $limit) ? 0 : 1 }" 2>/dev/null; then
+        kodo_log "BUDGET: ✖ $model BLOCKED — \$${spent} >= \$${limit} monthly limit"
+        kodo_send_telegram "🛑 KŌDŌ Budget BLOCKED: *${model}* at \$${spent} — monthly limit \$${limit} reached"
+        return 1
+    fi
+    return 0
 }
 
 # Check if a CLI is available
@@ -143,6 +189,72 @@ kodo_prompt() {
     local ctx
     ctx="$(kodo_runtime_context)"
     printf '%s\n\n---\n\n%s' "$ctx" "$instructions"
+}
+
+# ── Concurrent Processing Guard ──────────────────────────────
+# Atomic claim-before-process. Prevents two engine instances from
+# processing the same event_id+domain simultaneously.
+# Uses PID-based ownership with stale PID detection.
+
+# Claim an event for processing. Returns 0 if claimed, 1 if already claimed.
+# Usage: kodo_claim_event <event_id> <domain>
+kodo_claim_event() {
+    local event_id="$1" domain="$2"
+    local my_pid=$$
+    local eid dom
+    eid="$(kodo_sql_escape "$event_id")"
+    dom="$(kodo_sql_escape "$domain")"
+
+    # Atomic claim: only succeed if processing_pid is NULL or stale
+    # First, clear stale PIDs (process no longer running)
+    local current_pid
+    current_pid=$(kodo_sql "SELECT processing_pid FROM pipeline_state
+        WHERE event_id = '${eid}' AND domain = '${dom}';")
+
+    if [[ -n "$current_pid" && "$current_pid" != "NULL" && "$current_pid" != "" ]]; then
+        if [[ "$current_pid" == "$my_pid" ]]; then
+            # Already own it — re-entrant claim is fine
+            return 0
+        elif kill -0 "$current_pid" 2>/dev/null; then
+            # Another live process owns it
+            kodo_log "LOCK: $event_id [$domain] owned by PID $current_pid (alive) — skipping"
+            return 1
+        else
+            kodo_log "LOCK: $event_id [$domain] stale PID $current_pid (dead) — reclaiming"
+        fi
+    fi
+
+    # Claim with atomic UPDATE (WHERE processing_pid IS NULL OR stale)
+    kodo_sql "UPDATE pipeline_state
+        SET processing_pid = ${my_pid}, updated_at = datetime('now')
+        WHERE event_id = '${eid}' AND domain = '${dom}'
+        AND (processing_pid IS NULL OR processing_pid = ${my_pid}
+             OR NOT EXISTS (SELECT 1 FROM (SELECT ${current_pid:-0} AS pid) WHERE pid > 0));"
+
+    # Verify we got the claim
+    local claimed_pid
+    claimed_pid=$(kodo_sql "SELECT processing_pid FROM pipeline_state
+        WHERE event_id = '${eid}' AND domain = '${dom}';")
+
+    if [[ "$claimed_pid" == "$my_pid" ]]; then
+        kodo_log "LOCK: $event_id [$domain] claimed by PID $my_pid"
+        return 0
+    else
+        kodo_log "LOCK: $event_id [$domain] claim race lost to PID $claimed_pid"
+        return 1
+    fi
+}
+
+# Release an event after processing
+# Usage: kodo_release_event <event_id> <domain>
+kodo_release_event() {
+    local event_id="$1" domain="$2"
+    local my_pid=$$
+    kodo_sql "UPDATE pipeline_state
+        SET processing_pid = NULL
+        WHERE event_id = '$(kodo_sql_escape "$event_id")'
+        AND domain = '$(kodo_sql_escape "$domain")'
+        AND processing_pid = ${my_pid};"
 }
 
 # ── Robust JSON Extraction ───────────────────────────────────
@@ -257,6 +369,12 @@ kodo_invoke_llm() {
     fi
 
     local raw_output="" result="" cost=0 tokens_in=0 tokens_out=0
+
+    # Budget gate: check BEFORE invoking (prevents surprise bills)
+    if ! kodo_check_budget "$cli"; then
+        kodo_log "BUDGET: $cli call blocked for ${repo:-unknown}/${domain:-unknown}"
+        return 1
+    fi
 
     case "$cli" in
         claude)

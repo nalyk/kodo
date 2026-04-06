@@ -204,6 +204,13 @@ do_event() {
 
     export KODO_TRANSITION_REPO="$repo_id"
 
+    # Concurrent processing guard
+    if ! kodo_claim_event "$event_id" "pm"; then
+        return 0
+    fi
+    # Release on function return (not EXIT — PM has multiple modes)
+    trap 'kodo_release_event "$event_id" "pm"' RETURN
+
     local state
     state=$(kodo_sql "SELECT state FROM pipeline_state
         WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = 'pm';")
