@@ -1,119 +1,115 @@
-# KŌDŌ
+<p align="center">
+  <strong>KŌDŌ</strong><br>
+  <sub>鼓動 — heartbeat</sub>
+</p>
 
-Autonomous repo ops. Bash scripts + cron + headless AI CLIs maintaining your git repositories while you sleep.
+<p align="center">
+  <em>Your repos have a pulse now.</em>
+</p>
 
-KŌDŌ (鼓動) means "heartbeat" in Japanese.
+---
 
-## What it does
+Bash scripts and cron jobs that wire up headless AI CLIs to autonomously maintain git repositories. Reviews PRs, generates fixes, welcomes contributors, triages issues, writes changelogs, tracks velocity — all while you're not looking.
 
-Four cron jobs detect events across your repos, classify them, and route to three domain engines:
-
-- **Dev** — PR review, code generation, confidence scoring, merge/revert, semver releases
-- **Marketing** — contributor welcomes, changelogs, announcements, good-first-issue curation
-- **PM** — backlog triage, velocity reports, roadmap tracking, feature evaluation
-
-No framework. No build step. No runtime dependencies beyond bash, sqlite3, jq, and the AI CLIs.
-
-## How it works
+No framework. No containers. No YAML pipelines. No "infrastructure."
+Eleven shell scripts, four cron entries, one SQLite file.
 
 ```
-*/2 * * * *  kodo-scout.sh     # detect events across all repos
-*   * * * *  kodo-brain.sh     # classify + route (flock protected)
-0  10 * * *  kodo-pm.sh        # daily backlog triage
-0   9 * * 1  kodo-weekly.sh    # weekly health + PM report
+git clone <this> ~/.kodo && crontab ~/.kodo/crontab.txt && ~/.kodo/bin/kodo-add.sh you/repo
 ```
 
-Scout polls. Brain classifies (bash logic, no LLM). Engines process. State machine enforces transitions. Everything logs to SQLite.
+That's the whole deploy.
+
+---
+
+### The idea
+
+You have repos. Things happen in them — PRs open, issues pile up, releases ship, contributors show up. Right now, you handle all of that. Or you don't, and it rots.
+
+KŌDŌ handles it. Three engines run in parallel:
+
+**Dev** — Reviews every PR with structured confidence scoring. Score ≥90: auto-merge. Score 50-89: three AI models vote, 2/3 consensus required. Score <50: deferred, you deal with it. Hard gates (tests, semgrep, diff size) run *before* any AI touches it. 48h post-merge rollback window.
+
+**Marketing** — Welcomes first-time contributors within minutes. Generates changelogs from commit history. Curates good-first-issues. Runs contributor spotlights. All with the repo's own voice, not generic AI slop.
+
+**PM** — Daily backlog triage. Weekly velocity reports. Feature request evaluation. Stale issue cleanup. Roadmap tracking against milestones. Competitive landscape if you feed it signals.
+
+Classification is bash `case` statements. No LLM decides what goes where.
+
+---
+
+### The economics
+
+| Model | What it does | What it costs |
+|-------|-------------|---------------|
+| Claude | Reviews code, scores confidence, writes PM reports | $200/mo |
+| Codex | Generates fixes, writes regression tests | $20/mo |
+| Gemini | Writes all the content (changelogs, welcomes, docs) | $0 |
+| Qwen | Triages every issue, grooms the backlog daily | $0 |
+
+The expensive model thinks. The free models work. Total: **$220/mo** for 3-5 active repos.
+
+When Claude goes down, the system doesn't make bad decisions. It queues events, degrades gracefully for 30 minutes, then hibernates. No merge happens without the confidence it deserves.
+
+---
+
+### The safety model
+
+Every merge goes through this gauntlet:
 
 ```
-GitHub event → scout → brain → engine → [hard gates → LLM review → merge/defer]
-                                              ↓
-                                         kodo-transition.sh (state machine)
-                                              ↓
-                                          kodo.db
+hard gates (tests, semgrep, diff ≤ 500 lines, scope check)
+    ↓ all pass
+auto-generated regression tests (Codex writes tests for the diff)
+    ↓ no surprises
+confidence review (Claude scores 0-100, structured JSON)
+    ↓ score ≥ 90
+auto-merge → 48h rollback window → resolved
+
+    ↓ score 50-89
+ballot (Claude + Gemini + Qwen vote independently, 2/3 required)
+
+    ↓ score < 50 or any gate fails
+deferred (retry twice, then close with explanation)
 ```
 
-## The four CLIs
+Shadow mode runs the entire pipeline but takes zero write actions. Flip one TOML value when you trust it.
 
-| CLI | Role | Cost |
-|-----|------|------|
-| `claude -p` | Strategy, code review, PM analysis | $200/mo |
-| `codex exec` | Code generation, bug fixes | $20/mo |
-| `gemini -p` | Bulk content, changelogs, welcomes | Free |
-| `qwen -p` | Issue triage, stale detection, labels | Free |
+All state transitions go through one file (`kodo-transition.sh`). Invalid transitions are rejected. The state machine has 30+ transitions across three domains and every single one is explicitly enumerated.
 
-The expensive model does strategy. The free models do volume.
+---
 
-## Install
-
-```bash
-git clone <this-repo> ~/.kodo
-crontab ~/.kodo/crontab.txt
-~/.kodo/bin/kodo-add.sh owner/repo
-```
-
-That's it. `kodo-add` auto-discovers your repo (language, CI, tests, branch protection) and starts in shadow mode. Shadow mode runs everything but takes no write actions. When accuracy looks good, flip `mode = "live"` in the TOML.
-
-## Confidence-gated merging
-
-Every PR gets a confidence score 0-100:
-
-- **90+** → auto-merge (no human needed)
-- **50-89** → ballot (2/3 CLI consensus required)
-- **0-49** → defer (flag for attention)
-
-Bands are adaptive. 30-day rolling window of merge outcomes adjusts thresholds automatically. If your auto-merges start getting reverted, the threshold tightens on its own.
-
-After every merge: 48h rollback window. CI regression → auto-revert.
-
-## Safety
-
-- All state transitions enforced by one script (`kodo-transition.sh`)
-- All git operations go through one adapter (`kodo-git.sh`) — shadow mode enforced there
-- All LLM output is structured JSON via `--json-schema` — no free-text parsing
-- Hard gates (tests, semgrep, diff size, scope) must pass before any LLM even looks at the code
-- Budget tracked per-model per-month in SQLite
-
-When Claude goes down: Codex reviews (capped confidence) → queue events → hibernate after 4h. Recovery drains the queue chronologically.
-
-## Files
+### What's in the box
 
 ```
 ~/.kodo/
-├── bin/                    # 11 bash scripts (~2500 lines total)
-│   ├── kodo-lib.sh         # shared functions
-│   ├── kodo-scout.sh       # event detection
-│   ├── kodo-brain.sh       # classification + routing
-│   ├── kodo-dev.sh         # dev ops engine
-│   ├── kodo-mkt.sh         # marketing engine
-│   ├── kodo-pm.sh          # PM engine
-│   ├── kodo-transition.sh  # state machine
-│   ├── kodo-git.sh         # git provider abstraction
-│   ├── kodo-add.sh         # repo onboarding
-│   ├── kodo-weekly.sh      # weekly health + reports
-│   └── kodo-status.sh      # terminal dashboard
-├── context/
-│   └── runtime-rules.md    # shared rules injected into all LLM prompts
-├── schemas/                # JSON schemas for structured LLM output
-├── repos/                  # per-repo TOML configs (auto-generated)
-├── crontab.txt             # 4 entries, the entire schedule
-└── kodo.db                 # SQLite (runtime, gitignored)
+├── bin/                      11 scripts, ~2500 lines
+├── context/runtime-rules.md  shared rules injected into every LLM prompt
+├── schemas/                  4 JSON schemas — all LLM output is structured
+├── repos/                    per-repo TOML configs (auto-generated on onboard)
+├── crontab.txt               4 lines. the whole schedule
+└── kodo.db                   SQLite. 9 tables. the brain's memory
 ```
 
-GitHub and GitLab supported. Gitea/Bitbucket stubbed (API adapter ready, needs implementation).
+GitHub day-one. GitLab day-one. Gitea/Bitbucket: adapter ready, endpoints stubbed.
 
-## Status
+---
 
-```bash
-~/.kodo/bin/kodo-status.sh
-```
+### Requirements
 
-Shows repos, pipeline state, budget usage, CLI availability, recent deferrals. Read-only.
+`bash 5+` · `sqlite3` · `jq` · `flock` · `git` · `curl`
 
-## Requirements
+Plus the AI CLIs you want: `claude` · `codex` · `gemini` · `qwen`
+Plus your git provider CLI: `gh` or `glab`
 
-bash 5+, sqlite3, jq, flock, git, curl. Plus whichever AI CLIs you want to use (claude, codex, gemini, qwen). `gh` for GitHub repos, `glab` for GitLab.
+---
 
-## License
+### Status
 
-Do what you want with it.
+Working implementation. Not battle-tested yet. Shadow mode exists for a reason — use it.
+
+The confidence bands self-calibrate over time. Start conservative. Let the data tell you when to trust it.
+
+---
+
+<sub>KŌDŌ — because your repos shouldn't need you to breathe.</sub>
