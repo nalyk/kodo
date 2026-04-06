@@ -68,9 +68,18 @@ do_triaging() {
     local payload
     payload="$(get_payload)"
 
-    # Distinguish PR vs Issue from event_id (deterministic, not payload-dependent)
+    # Distinguish PR vs Issue: check event_id pattern first, fall back to payload
     local is_pr=false
-    [[ "$EVENT_ID" == *"PullRequestEvent"* ]] && is_pr=true
+    if [[ "$EVENT_ID" == *"PullRequestEvent"* ]]; then
+        is_pr=true
+    elif [[ "$EVENT_ID" == *"IssuesEvent"* ]]; then
+        is_pr=false
+    else
+        # Fallback: check payload for PR-specific fields (headRefName only exists on PRs)
+        local has_head_ref
+        has_head_ref=$(echo "$payload" | jq -r '.headRefName // empty' 2>/dev/null)
+        [[ -n "$has_head_ref" ]] && is_pr=true
+    fi
 
     if $is_pr; then
         _triage_pr "$payload"
@@ -418,41 +427,60 @@ Review the change for correctness, security, and safety. Cast your vote.")"
 
     local ballot_schema="$KODO_HOME/schemas/ballot.schema.json"
 
-    # Collect structured votes from each available CLI
+    # Collect structured votes in PARALLEL — all 3 CLIs run concurrently
+    local vote_dir
+    vote_dir=$(mktemp -d)
+
     _cast_ballot() {
-        local cli="$1"
+        local cli="$1" outfile="$vote_dir/$cli.json"
         local result
         result=$(kodo_invoke_llm "$cli" "$ballot_prompt" \
             --schema "$ballot_schema" \
             --timeout 120 \
             --repo "$REPO_ID" \
-            --domain "dev") || return 1
-
-        local vote score reason
-        vote=$(echo "$result" | jq -r '.vote // "reject"' 2>/dev/null)
-        score=$(echo "$result" | jq -r '.score // 0' 2>/dev/null)
-        reason=$(echo "$result" | jq -r '.reason // "no reason"' 2>/dev/null | head -c 120)
-
-        kodo_log "DEV: ballot $cli: $vote ($score) — $reason"
-        vote_log="${vote_log}${cli}:${vote}:${score} "
-        total=$((total + 1))
-        [[ "$vote" == "approve" && "$score" -ge 50 ]] && votes=$((votes + 1))
+            --domain "dev" 2>/dev/null) || { echo '{"vote":"error"}' > "$outfile"; return; }
+        echo "$result" > "$outfile"
     }
 
-    # Vote 1: Claude
+    # Launch all votes in parallel
+    local pids=""
     if _claude_available; then
-        _cast_ballot "claude"
+        _cast_ballot "claude" &
+        pids="$pids $!"
     fi
-
-    # Vote 2: Gemini (free)
     if kodo_cli_available gemini; then
-        _cast_ballot "gemini"
+        _cast_ballot "gemini" &
+        pids="$pids $!"
+    fi
+    if kodo_cli_available qwen; then
+        _cast_ballot "qwen" &
+        pids="$pids $!"
     fi
 
-    # Vote 3: Qwen (free)
-    if kodo_cli_available qwen; then
-        _cast_ballot "qwen"
-    fi
+    # Wait for all votes to complete
+    for pid in $pids; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    # Tally results
+    for vfile in "$vote_dir"/*.json; do
+        [[ ! -f "$vfile" ]] && continue
+        local cli_name
+        cli_name=$(basename "$vfile" .json)
+        local vote score reason
+        vote=$(jq -r '.vote // "error"' "$vfile" 2>/dev/null)
+        score=$(jq -r '.score // 0' "$vfile" 2>/dev/null)
+        reason=$(jq -r '.reason // "no reason"' "$vfile" 2>/dev/null | head -c 120)
+
+        [[ "$vote" == "error" ]] && continue
+
+        kodo_log "DEV: ballot $cli_name: $vote ($score) — $reason"
+        vote_log="${vote_log}${cli_name}:${vote}:${score} "
+        total=$((total + 1))
+        [[ "$vote" == "approve" && "$score" -ge 50 ]] && votes=$((votes + 1))
+    done
+
+    rm -rf "$vote_dir"
 
     kodo_log "DEV: ballot tally: $votes/$total [$vote_log]"
 
@@ -539,6 +567,10 @@ do_reverting() {
 }
 
 # ── Main State Machine Driver ────────────────────────────────
+# Loops through states until a terminal state or a blocking operation.
+# One invocation drives the event as far as it can go — no re-dispatch needed.
+
+readonly MAX_STEPS=12
 
 main() {
     local state
@@ -549,24 +581,49 @@ main() {
         exit 0
     fi
 
-    kodo_log "DEV: processing $EVENT_ID (state: $state)"
+    local step=0
+    while [[ "$step" -lt "$MAX_STEPS" ]]; do
+        state="$(get_state)"
+        step=$((step + 1))
 
-    case "$state" in
-        pending)         transition "pending" "triaging"; do_triaging ;;
-        triaging)        do_triaging ;;
-        generating)      do_generating ;;
-        hard_gates)      do_hard_gates ;;
-        auditing)        do_auditing ;;
-        scanning)        do_scanning ;;
-        balloting)       do_balloting ;;
-        auto_merge)      do_auto_merge ;;
-        guarded_merge)   do_guarded_merge ;;
-        releasing)       do_releasing ;;
-        reverting)       do_reverting ;;
-        resolved|closed) kodo_log "DEV: $EVENT_ID already $state" ;;
-        deferred)        kodo_log "DEV: $EVENT_ID deferred — waiting for retry" ;;
-        *)               kodo_log "DEV: unknown state '$state' for $EVENT_ID" ;;
-    esac
+        kodo_log "DEV: processing $EVENT_ID (state: $state, step: $step)"
+
+        case "$state" in
+            pending)         transition "pending" "triaging"; do_triaging ;;
+            triaging)        do_triaging ;;
+            generating)      do_generating ;;
+            hard_gates)      do_hard_gates ;;
+            auditing)        do_auditing ;;
+            scanning)        do_scanning ;;
+            balloting)       do_balloting ;;
+            auto_merge)      do_auto_merge ;;
+            guarded_merge)   do_guarded_merge ;;
+            releasing)       do_releasing ;;
+            reverting)       do_reverting ;;
+            resolved|closed)
+                kodo_log "DEV: $EVENT_ID reached terminal state: $state"
+                return 0
+                ;;
+            deferred)
+                kodo_log "DEV: $EVENT_ID deferred — stopping"
+                return 0
+                ;;
+            *)
+                kodo_log "DEV: unknown state '$state' for $EVENT_ID"
+                return 1
+                ;;
+        esac
+
+        # Check if state actually advanced (avoid infinite loop on stuck transitions)
+        local new_state
+        new_state="$(get_state)"
+        if [[ "$new_state" == "$state" ]]; then
+            kodo_log "DEV: state unchanged ($state) — engine yielding"
+            return 0
+        fi
+    done
+
+    kodo_log "DEV: max steps ($MAX_STEPS) reached for $EVENT_ID — yielding"
 }
 
 main
