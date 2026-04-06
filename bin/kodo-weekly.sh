@@ -123,7 +123,8 @@ do_health_check() {
         echo "=== Health: $issues ISSUES FOUND ==="
     fi
 
-    return "$issues"
+    # Cap at 125 to avoid exit code wrap (256→0)
+    return $(( issues > 125 ? 125 : issues ))
 }
 
 # ── Shadow → Live Promotion Check ───────────────────────────

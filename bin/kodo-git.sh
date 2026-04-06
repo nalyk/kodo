@@ -32,7 +32,7 @@ _guard_write() {
     local toml="$1" action="$2"
     if kodo_is_shadow "$toml"; then
         kodo_log "SHADOW BLOCK: $action on $(kodo_repo_id "$toml") — log only"
-        return 1
+        return 3  # distinct code: 3 = shadow blocked (not error)
     fi
     return 0
 }
@@ -144,7 +144,7 @@ _gh_compare() {
 
 _glab_pr_list() {
     local slug="$1"
-    glab mr list --repo "$slug" --output json 2>/dev/null || echo "[]"
+    glab mr list --repo "$slug" --output json 2>/dev/null || { kodo_log "ERROR: glab mr list failed for $slug"; return 1; }
 }
 
 _glab_pr_comment() {
@@ -159,7 +159,7 @@ _glab_pr_merge() {
 
 _glab_issue_list() {
     local slug="$1"
-    glab issue list --repo "$slug" --output json 2>/dev/null || echo "[]"
+    glab issue list --repo "$slug" --output json 2>/dev/null || { kodo_log "ERROR: glab issue list failed for $slug"; return 1; }
 }
 
 _glab_issue_comment() {
@@ -179,7 +179,7 @@ _glab_issue_label() {
 
 _glab_release_get() {
     local slug="$1" tag="$2"
-    glab release view "$tag" --repo "$slug" --output json 2>/dev/null || echo "{}"
+    glab release view "$tag" --repo "$slug" --output json 2>/dev/null || { kodo_log "ERROR: glab release view failed for $slug $tag"; return 1; }
 }
 
 _glab_release_edit() {
@@ -300,9 +300,7 @@ main() {
     # Write actions require shadow mode check
     local write_actions="pr-comment pr-merge pr-create branch-push issue-comment issue-close issue-label release-edit discussion-create"
     if [[ " $write_actions " == *" $action "* ]]; then
-        if ! _guard_write "$toml" "$action"; then
-            return 0
-        fi
+        _guard_write "$toml" "$action" || return $?
     fi
 
     case "$provider" in

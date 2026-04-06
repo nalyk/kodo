@@ -181,14 +181,13 @@ Guidelines:
     kodo_log_budget "gemini" "$REPO_ID" "mkt" 0 0 0.0
 
     # Quality review for releases (Claude, if available and enabled)
-    if kodo_toml_bool "$REPO_TOML" "generate_changelogs" && kodo_cli_available claude; then
+    if kodo_toml_bool "$REPO_TOML" "generate_changelogs" && kodo_cli_available claude && kodo_check_budget "claude"; then
         local reviewed
-        reviewed=$(timeout 60 claude -p "Review and improve this changelog for accuracy and tone. Keep the same structure:
+        reviewed=$(kodo_invoke_llm claude "Review and improve this changelog for accuracy and tone. Keep the same structure:
 
-$changelog" --max-turns 1 2>/dev/null) || reviewed="$changelog"
+$changelog" --timeout 60 --repo "$REPO_ID" --domain "mkt") || reviewed=""
         if [[ -n "$reviewed" ]]; then
             changelog="$reviewed"
-            kodo_log_budget "claude" "$REPO_ID" "mkt" 0 0 0.50
         fi
         transition "drafting" "reviewing"
         transition "reviewing" "published"

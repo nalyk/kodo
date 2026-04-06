@@ -140,10 +140,12 @@ main() {
         repo_id="$(kodo_repo_id "$toml")"
         toml_count=$((toml_count + 1))
 
-        local dev_enabled mkt_enabled pm_enabled
-        dev_enabled=$(kodo_toml_bool "$toml" "enabled" && echo "1" || echo "0")
+        # Skip disabled repos
+        if ! kodo_toml_bool "$toml" "enabled" 2>/dev/null; then
+            kodo_log "SCOUT: $repo_id disabled — skipping"
+            continue
+        fi
 
-        # Scan based on enabled engines
         scan_pull_requests "$toml" "$repo_id"
         scan_issues "$toml" "$repo_id"
         scan_releases "$toml" "$repo_id"
