@@ -273,6 +273,14 @@ main() {
                 event_type="ReleaseEvent"
             elif [[ "$EVENT_ID" == *"IssuesEvent"* ]]; then
                 event_type="IssuesEvent"
+            elif [[ "$EVENT_ID" == *"IssueCommentEvent"* ]]; then
+                event_type="IssueCommentEvent"
+            elif [[ "$EVENT_ID" == *"ForkEvent"* ]]; then
+                event_type="ForkEvent"
+            elif [[ "$EVENT_ID" == *"WatchEvent"* ]]; then
+                event_type="WatchEvent"
+            elif [[ "$EVENT_ID" == *"DiscussionEvent"* ]]; then
+                event_type="DiscussionEvent"
             fi
 
             kodo_log "MKT: resuming $EVENT_ID in drafting (re-generating content)"
@@ -282,6 +290,9 @@ main() {
                     ;;
                 ReleaseEvent)
                     generate_changelog "$payload"
+                    ;;
+                ForkEvent|WatchEvent|DiscussionEvent)
+                    generate_announcement "$payload"
                     ;;
                 *)
                     transition "drafting" "published"

@@ -272,7 +272,7 @@ If this is a milestone, summarize progress and flag risks.")"
                             --timeout 120 \
                             --repo "$repo_id" \
                             --domain "pm") || result=""
-                        [[ -n "$result" ]] && break
+                        [[ -n "$result" ]] && eval_cli="$cli" && break
                     fi
                 done
             fi
