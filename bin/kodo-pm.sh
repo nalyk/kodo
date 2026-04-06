@@ -219,28 +219,75 @@ do_event() {
         pending)
             "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "pending" "analyzing" "pm"
 
-            # Feature evaluation via Claude
-            if kodo_cli_available claude; then
-                local payload="{}"
-                local prompt
-                prompt="$(kodo_prompt "Evaluate this event for $repo_slug. Assess feasibility, alignment, effort, and priority.")"
+            # Get actual event payload for context
+            local payload
+            payload=$(kodo_sql "SELECT payload_json FROM pipeline_state
+                WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = 'pm';")
+            payload="${payload:-\{\}}"
 
-                local result
-                result=$(kodo_invoke_llm claude "$prompt" \
-                    --schema "$KODO_HOME/schemas/pm-report.schema.json" \
-                    --timeout 120 \
-                    --repo "$repo_id" \
-                    --domain "pm") || {
-                    "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "deferred" "pm"
-                    return
-                }
+            local event_title event_detail
+            event_title=$(echo "$payload" | jq -r '.title // .description // "untitled"' 2>/dev/null)
+            event_detail=$(echo "$payload" | jq -r '
+                "Number: \(.number // "N/A")\nState: \(.state // "N/A")\nDue: \(.dueOn // "N/A")\nProgress: \(.closedIssues // 0)/\((.closedIssues // 0) + (.openIssues // 0)) issues"
+            ' 2>/dev/null) || event_detail=""
 
-                kodo_sql "INSERT INTO pm_artifacts (repo, type, data_json)
-                    VALUES ('$(kodo_sql_escape "$repo_id")', 'evaluation', '$(kodo_sql_escape "$result")');"
+            local prompt
+            prompt="$(kodo_prompt "Evaluate this event for $repo_slug.
+
+Event: $event_title
+$event_detail
+
+Assess: feasibility, alignment with project goals, effort estimate, and priority (P0-P3).
+If this is a milestone, summarize progress and flag risks.")"
+
+            # Use free-tier CLIs first — Claude is the expensive fallback
+            local eval_cli="" result=""
+            for cli in qwen gemini claude; do
+                if kodo_cli_available "$cli"; then
+                    eval_cli="$cli"
+                    break
+                fi
+            done
+
+            if [[ -z "$eval_cli" ]]; then
+                kodo_log "PM: no CLI available for evaluation"
+                "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "deferred" "pm"
+                return
             fi
 
+            result=$(kodo_invoke_llm "$eval_cli" "$prompt" \
+                --schema "$KODO_HOME/schemas/pm-report.schema.json" \
+                --timeout 120 \
+                --repo "$repo_id" \
+                --domain "pm") || result=""
+
+            # Fallback chain: if primary fails, try next available CLI
+            if [[ -z "$result" ]]; then
+                for cli in qwen gemini claude; do
+                    [[ "$cli" == "$eval_cli" ]] && continue
+                    if kodo_cli_available "$cli"; then
+                        kodo_log "PM: $eval_cli failed, falling back to $cli"
+                        result=$(kodo_invoke_llm "$cli" "$prompt" \
+                            --schema "$KODO_HOME/schemas/pm-report.schema.json" \
+                            --timeout 120 \
+                            --repo "$repo_id" \
+                            --domain "pm") || result=""
+                        [[ -n "$result" ]] && eval_cli="$cli" && break
+                    fi
+                done
+            fi
+
+            if [[ -z "$result" ]]; then
+                kodo_log "PM: all CLIs failed for $event_id"
+                "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "deferred" "pm"
+                return
+            fi
+
+            kodo_sql "INSERT INTO pm_artifacts (repo, type, data_json)
+                VALUES ('$(kodo_sql_escape "$repo_id")', 'evaluation', '$(kodo_sql_escape "$result")');"
+
             "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "reported" "pm"
-            kodo_log "PM: event $event_id analyzed for $repo_id"
+            kodo_log "PM: event $event_id analyzed for $repo_id (cli: $eval_cli)"
             ;;
         analyzing)
             kodo_log "PM: $event_id still analyzing"

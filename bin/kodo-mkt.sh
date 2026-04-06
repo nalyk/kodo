@@ -263,7 +263,41 @@ main() {
             esac
             ;;
         drafting)
-            kodo_log "MKT: $EVENT_ID in drafting — waiting for content"
+            # Re-execute content generation (engine may have died mid-drafting)
+            local payload
+            payload="$(get_payload)"
+            payload="${payload:-\{\}}"
+
+            local event_type="PullRequestEvent"
+            if [[ "$EVENT_ID" == *"ReleaseEvent"* ]]; then
+                event_type="ReleaseEvent"
+            elif [[ "$EVENT_ID" == *"IssuesEvent"* ]]; then
+                event_type="IssuesEvent"
+            elif [[ "$EVENT_ID" == *"IssueCommentEvent"* ]]; then
+                event_type="IssueCommentEvent"
+            elif [[ "$EVENT_ID" == *"ForkEvent"* ]]; then
+                event_type="ForkEvent"
+            elif [[ "$EVENT_ID" == *"WatchEvent"* ]]; then
+                event_type="WatchEvent"
+            elif [[ "$EVENT_ID" == *"DiscussionEvent"* ]]; then
+                event_type="DiscussionEvent"
+            fi
+
+            kodo_log "MKT: resuming $EVENT_ID in drafting (re-generating content)"
+            case "$event_type" in
+                PullRequestEvent|IssueCommentEvent|IssuesEvent)
+                    generate_welcome "$payload"
+                    ;;
+                ReleaseEvent)
+                    generate_changelog "$payload"
+                    ;;
+                ForkEvent|WatchEvent|DiscussionEvent)
+                    generate_announcement "$payload"
+                    ;;
+                *)
+                    transition "drafting" "published"
+                    ;;
+            esac
             ;;
         reviewing)
             kodo_log "MKT: $EVENT_ID in review"
