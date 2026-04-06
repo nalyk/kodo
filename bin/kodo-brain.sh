@@ -171,11 +171,10 @@ main() {
 
             # Dispatch to each domain
             for domain in $domains; do
-                # Check if already in pipeline for this domain
+                # Check if already in pipeline for this domain (any state = skip)
                 local existing
                 existing=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
-                    WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")'
-                    AND state NOT IN ('resolved', 'closed');")
+                    WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")';")
                 if [[ "$existing" -gt 0 ]]; then
                     continue
                 fi
@@ -189,7 +188,28 @@ main() {
         done <<< "$events"
     fi
 
-    # Phase 2: Advance events stuck in intermediate states (including orphaned pending)
+    # Phase 2a: Reap stale PIDs — dead processes leave events orphaned
+    # Check processing_pid for events stuck > 60s with a non-null PID
+    local stale_pids
+    stale_pids=$(kodo_sql "SELECT event_id, domain, processing_pid FROM pipeline_state
+        WHERE state NOT IN ('resolved', 'closed', 'published', 'reported')
+        AND processing_pid IS NOT NULL AND processing_pid > 0
+        AND updated_at < datetime('now', '-60 seconds')
+        ORDER BY updated_at ASC LIMIT 20;")
+
+    if [[ -n "$stale_pids" ]]; then
+        while IFS='|' read -r event_id domain pid; do
+            [[ -z "$event_id" ]] && continue
+            if ! kill -0 "$pid" 2>/dev/null; then
+                kodo_log "BRAIN: reaping dead PID $pid for $event_id [$domain]"
+                kodo_sql "UPDATE pipeline_state SET processing_pid = NULL, updated_at = datetime('now')
+                    WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")'
+                    AND processing_pid = ${pid};"
+            fi
+        done <<< "$stale_pids"
+    fi
+
+    # Phase 2b: Advance events stuck in intermediate states
     # Re-dispatch engines for events that need further processing
     local stalled
     stalled=$(kodo_sql "SELECT event_id, repo, domain, state FROM pipeline_state
