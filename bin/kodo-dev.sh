@@ -739,7 +739,10 @@ _check_ci_and_merge() {
 
     # Check CI status via kodo-git.sh
     local ci_status
-    ci_status=$("$SCRIPT_DIR/kodo-git.sh" pr-checks "$REPO_TOML" "$pr_num" 2>/dev/null) || ci_status=""
+    ci_status=$("$SCRIPT_DIR/kodo-git.sh" pr-checks "$REPO_TOML" "$pr_num" 2>&1) || {
+        kodo_log "DEV: CI check API failed for PR #$pr_num — yielding (will not merge without CI)"
+        return 1
+    }
 
     if [[ -n "$ci_status" ]]; then
         local ci_state ci_pass ci_fail ci_pending ci_total

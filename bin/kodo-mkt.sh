@@ -228,7 +228,7 @@ main() {
 
             local payload
             payload="$(get_payload)"
-            payload="${payload:-\{\}}"
+            payload="${payload:-{}}"
 
             # Determine content type from event_id pattern
             local event_type="PullRequestEvent"
