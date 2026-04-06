@@ -182,6 +182,73 @@ _glab_release_edit() {
     glab release edit "$tag" --repo "$slug" --notes "$notes"
 }
 
+# ── Repo Operations (provider-agnostic) ─────────────────────
+
+# Clone a repo to a temporary working directory
+# Returns: path to the cloned directory on stdout
+_gh_repo_clone() {
+    local slug="$1" branch="${2:-}"
+    local work_dir="$KODO_HOME/.workdir/${slug//\//-}-$$"
+    mkdir -p "$work_dir"
+
+    local clone_args=(--depth 50 --single-branch)
+    if [[ -n "$branch" ]]; then
+        clone_args+=(--branch "$branch")
+    fi
+
+    if gh repo clone "$slug" "$work_dir" -- "${clone_args[@]}" >/dev/null 2>&1; then
+        echo "$work_dir"
+        return 0
+    else
+        rm -rf "$work_dir"
+        return 1
+    fi
+}
+
+# Create a branch in a local clone and push it
+_gh_branch_create() {
+    local work_dir="$1" branch_name="$2"
+    cd "$work_dir" || return 1
+    git checkout -b "$branch_name" 2>/dev/null
+    cd - >/dev/null
+}
+
+# Create a PR from a branch
+_gh_pr_create() {
+    local slug="$1" branch="$2" title="$3" body="$4"
+    gh pr create --repo "$slug" --head "$branch" --title "$title" --body "$body"
+}
+
+# Push a branch from a working directory
+_gh_branch_push() {
+    local work_dir="$1" branch_name="$2"
+    cd "$work_dir" || return 1
+    # --force-with-lease: safe force push — allows retry when branch exists from prior run
+    git push --force-with-lease origin "$branch_name" 2>/dev/null
+    cd - >/dev/null
+}
+
+# Clean up a working directory
+_cleanup_workdir() {
+    local work_dir="$1"
+    if [[ -d "$work_dir" && "$work_dir" == *"/.workdir/"* ]]; then
+        rm -rf "$work_dir"
+    fi
+}
+
+# Get issue body (full content for context)
+_gh_issue_get() {
+    local slug="$1" issue_num="$2"
+    gh issue view "$issue_num" --repo "$slug" --json number,title,body,labels,comments --jq '{
+        number: .number,
+        title: .title,
+        body: .body,
+        labels: [.labels[].name],
+        comment_count: (.comments | length),
+        last_comments: [.comments[-3:][] | {author: .author.login, body: .body[:500]}]
+    }'
+}
+
 # ── Gitea / Bitbucket stubs ──────────────────────────────────
 
 _stub_not_supported() {
@@ -194,9 +261,22 @@ _stub_not_supported() {
 
 main() {
     local action="${1:-}"
+
+    if [[ -z "$action" ]]; then
+        echo "Usage: kodo-git.sh <action> <repo-toml|path> [args...]" >&2
+        exit 1
+    fi
+
+    # Local operations that don't need a repo TOML — handle before provider dispatch
+    case "$action" in
+        branch-create)  shift; _gh_branch_create "$@"; return $? ;;
+        branch-push)    shift; _gh_branch_push "$@"; return $? ;;
+        cleanup-workdir) shift; _cleanup_workdir "$@"; return $? ;;
+    esac
+
     local toml="${2:-}"
 
-    if [[ -z "$action" || -z "$toml" ]]; then
+    if [[ -z "$toml" ]]; then
         echo "Usage: kodo-git.sh <action> <repo-toml> [args...]" >&2
         exit 1
     fi
@@ -218,7 +298,7 @@ main() {
     shift 2
 
     # Write actions require shadow mode check
-    local write_actions="pr-comment pr-merge issue-comment issue-close issue-label release-edit discussion-create"
+    local write_actions="pr-comment pr-merge pr-create branch-push issue-comment issue-close issue-label release-edit discussion-create"
     if [[ " $write_actions " == *" $action "* ]]; then
         if ! _guard_write "$toml" "$action"; then
             return 0
@@ -244,6 +324,9 @@ main() {
                 discussion-create)  _gh_discussion_create "$slug" "$@" ;;
                 milestone-list)     _gh_milestone_list "$slug" ;;
                 compare)            _gh_compare "$slug" "$@" ;;
+                repo-clone)         _gh_repo_clone "$slug" "$@" ;;
+                pr-create)          _gh_pr_create "$slug" "$@" ;;
+                issue-get)          _gh_issue_get "$slug" "$@" ;;
                 *) kodo_log "ERROR: unknown action '$action'"; exit 1 ;;
             esac
             ;;
