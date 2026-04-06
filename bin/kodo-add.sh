@@ -193,7 +193,7 @@ echo ""
 echo "=== Phase 4: Initializing shadow mode ==="
 
 # Initialize repo metrics
-sqlite3 "$KODO_DB" "INSERT OR IGNORE INTO repo_metrics (repo) VALUES ('$(kodo_sql_escape "$REPO_ID")');"
+kodo_sql "INSERT OR IGNORE INTO repo_metrics (repo) VALUES ('$(kodo_sql_escape "$REPO_ID")');"
 
 echo "  Repo registered in shadow mode"
 echo "  Next scout cycle will start detecting events"

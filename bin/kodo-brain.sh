@@ -147,7 +147,7 @@ dispatch_engine() {
 main() {
     # Process pending events in chronological order
     local events
-    events=$(sqlite3 "$KODO_DB" "SELECT event_id, repo, event_type, payload_json
+    events=$(kodo_sql "SELECT event_id, repo, event_type, payload_json
         FROM pending_events ORDER BY detected_at ASC LIMIT 20;")
 
     if [[ -z "$events" ]]; then
@@ -162,7 +162,7 @@ main() {
         # Check repo is registered
         if [[ ! -f "$KODO_HOME/repos/${repo}.toml" ]]; then
             kodo_log "BRAIN: unregistered repo '$repo' — removing event $event_id"
-            sqlite3 "$KODO_DB" "DELETE FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")';"
+            kodo_sql "DELETE FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")';"
             continue
         fi
 
@@ -175,7 +175,7 @@ main() {
         for domain in $domains; do
             # Check if already in pipeline for this domain
             local existing
-            existing=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pipeline_state
+            existing=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
                 WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")'
                 AND state NOT IN ('resolved', 'closed');")
             if [[ "$existing" -gt 0 ]]; then
@@ -185,7 +185,7 @@ main() {
         done
 
         # Remove from pending queue
-        sqlite3 "$KODO_DB" "DELETE FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")';"
+        kodo_sql "DELETE FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")';"
         processed=$((processed + 1))
 
     done <<< "$events"

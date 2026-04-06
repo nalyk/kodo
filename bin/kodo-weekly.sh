@@ -65,7 +65,7 @@ do_health_check() {
     echo ""
     echo "--- Database ---"
     local integrity
-    integrity=$(sqlite3 "$KODO_DB" "PRAGMA integrity_check;" 2>/dev/null)
+    integrity=$(kodo_sql "PRAGMA integrity_check;" 2>/dev/null)
     if [[ "$integrity" == "ok" ]]; then
         echo "  integrity: OK"
     else
@@ -75,9 +75,9 @@ do_health_check() {
 
     # Pipeline stats
     local pending in_progress deferred
-    pending=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pipeline_state WHERE state = 'pending';")
-    in_progress=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pipeline_state WHERE state NOT IN ('pending','resolved','closed','deferred');")
-    deferred=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pipeline_state WHERE state = 'deferred';")
+    pending=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state WHERE state = 'pending';")
+    in_progress=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state WHERE state NOT IN ('pending','resolved','closed','deferred');")
+    deferred=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state WHERE state = 'deferred';")
     echo "  pending events: $pending"
     echo "  in-progress: $in_progress"
     echo "  deferred: $deferred"
@@ -86,9 +86,9 @@ do_health_check() {
     echo ""
     echo "--- Budget (this month) ---"
     local claude_spent codex_spent
-    claude_spent=$(sqlite3 "$KODO_DB" "SELECT COALESCE(SUM(cost_usd), 0.0) FROM budget_ledger
+    claude_spent=$(kodo_sql "SELECT COALESCE(SUM(cost_usd), 0.0) FROM budget_ledger
         WHERE model = 'claude' AND invoked_at > date('now', 'start of month');")
-    codex_spent=$(sqlite3 "$KODO_DB" "SELECT COALESCE(SUM(cost_usd), 0.0) FROM budget_ledger
+    codex_spent=$(kodo_sql "SELECT COALESCE(SUM(cost_usd), 0.0) FROM budget_ledger
         WHERE model = 'codex' AND invoked_at > date('now', 'start of month');")
     echo "  claude: \$${claude_spent}/\$200"
     echo "  codex: \$${codex_spent}/\$20"
@@ -112,7 +112,7 @@ do_health_check() {
     echo ""
     echo "--- Errors (last 7 days) ---"
     local error_count
-    error_count=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM deferred_queue
+    error_count=$(kodo_sql "SELECT COUNT(*) FROM deferred_queue
         WHERE queued_at > datetime('now', '-7 days');")
     echo "  deferred events: $error_count"
 
@@ -144,7 +144,7 @@ check_shadow_promotion() {
 
         # Check if shadow has been running long enough
         local event_count
-        event_count=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pipeline_state
+        event_count=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
             WHERE repo = '$(kodo_sql_escape "$repo_id")';")
 
         if [[ "$event_count" -lt 10 ]]; then
@@ -154,12 +154,12 @@ check_shadow_promotion() {
 
         # Check accuracy (no deferred events from errors)
         local deferred_count
-        deferred_count=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM deferred_queue
+        deferred_count=$(kodo_sql "SELECT COUNT(*) FROM deferred_queue
             WHERE repo = '$(kodo_sql_escape "$repo_id")'
             AND queued_at > datetime('now', '-7 days');")
 
         local resolved_count
-        resolved_count=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pipeline_state
+        resolved_count=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
             WHERE repo = '$(kodo_sql_escape "$repo_id")' AND state IN ('resolved', 'published', 'reported');")
 
         if [[ "$resolved_count" -gt 0 && "$deferred_count" -lt 3 ]]; then
@@ -186,11 +186,11 @@ send_weekly_summary() {
     repo_count=$(find "$KODO_HOME/repos/" -name "*.toml" ! -name "_template.toml" 2>/dev/null | wc -l)
 
     local events_processed
-    events_processed=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pipeline_state
+    events_processed=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
         WHERE updated_at > datetime('now', '-7 days');")
 
     local claude_spent
-    claude_spent=$(sqlite3 "$KODO_DB" "SELECT COALESCE(SUM(cost_usd), 0.0) FROM budget_ledger
+    claude_spent=$(kodo_sql "SELECT COALESCE(SUM(cost_usd), 0.0) FROM budget_ledger
         WHERE model = 'claude' AND invoked_at > date('now', 'start of month');")
 
     local msg="*KODO Weekly Summary*

@@ -27,7 +27,7 @@ export KODO_TRANSITION_REPO="$REPO_ID"
 # ── Helpers ──────────────────────────────────────────────────
 
 get_state() {
-    sqlite3 "$KODO_DB" "SELECT state FROM pipeline_state
+    kodo_sql "SELECT state FROM pipeline_state
         WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND domain = 'mkt';"
 }
 
@@ -39,7 +39,7 @@ transition() {
 _already_done() {
     local author="$1" action="$2"
     local count
-    count=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM community_log
+    count=$(kodo_sql "SELECT COUNT(*) FROM community_log
         WHERE repo = '$(kodo_sql_escape "$REPO_ID")'
         AND author = '$(kodo_sql_escape "$author")'
         AND action = '$(kodo_sql_escape "$action")';")
@@ -48,7 +48,7 @@ _already_done() {
 
 _record_action() {
     local author="$1" action="$2"
-    sqlite3 "$KODO_DB" "INSERT OR IGNORE INTO community_log (repo, author, action)
+    kodo_sql "INSERT OR IGNORE INTO community_log (repo, author, action)
         VALUES ('$(kodo_sql_escape "$REPO_ID")', '$(kodo_sql_escape "$author")', '$(kodo_sql_escape "$action")');"
 }
 
@@ -218,7 +218,7 @@ main() {
 
             # Determine content type from event
             local event_type
-            event_type=$(sqlite3 "$KODO_DB" "SELECT event_type FROM pending_events
+            event_type=$(kodo_sql "SELECT event_type FROM pending_events
                 WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")';" 2>/dev/null)
             # Also check payload stored in pipeline
             if [[ -z "$event_type" ]]; then

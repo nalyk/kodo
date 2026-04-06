@@ -23,7 +23,7 @@ _event_key() {
 _event_exists() {
     local event_id="$1"
     local count
-    count=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")'
+    count=$(kodo_sql "SELECT COUNT(*) FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")'
         UNION ALL
         SELECT COUNT(*) FROM pipeline_state WHERE event_id = '$(kodo_sql_escape "$event_id")';" \
         | awk '{s+=$1} END{print s}')
@@ -33,7 +33,7 @@ _event_exists() {
 # Insert a new pending event
 _insert_event() {
     local event_id="$1" repo="$2" event_type="$3" payload="$4"
-    sqlite3 "$KODO_DB" "INSERT INTO pending_events (event_id, repo, event_type, payload_json)
+    kodo_sql "INSERT INTO pending_events (event_id, repo, event_type, payload_json)
         VALUES ('$(kodo_sql_escape "$event_id")', '$(kodo_sql_escape "$repo")', '$(kodo_sql_escape "$event_type")', '$(kodo_sql_escape "$payload")');"
     kodo_log "SCOUT: detected $event_type on $repo → $event_id"
 }
@@ -147,7 +147,7 @@ main() {
     done
 
     local new_events
-    new_events=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pending_events
+    new_events=$(kodo_sql "SELECT COUNT(*) FROM pending_events
         WHERE detected_at > datetime('now', '-3 minutes');")
 
     kodo_log "SCOUT: scanned $toml_count repos, $new_events new events"

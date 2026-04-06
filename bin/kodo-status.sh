@@ -47,12 +47,12 @@ for toml in "$KODO_HOME/repos/"*.toml; do
         mode_color="${YELLOW}SHADOW${NC}"
     fi
 
-    local_pending=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pipeline_state
+    local_pending=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
         WHERE repo = '$(kodo_sql_escape "$local_rid")' AND state = 'pending';")
-    local_active=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pipeline_state
+    local_active=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
         WHERE repo = '$(kodo_sql_escape "$local_rid")'
         AND state NOT IN ('pending','resolved','closed','deferred');")
-    local_deferred=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pipeline_state
+    local_deferred=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
         WHERE repo = '$(kodo_sql_escape "$local_rid")' AND state = 'deferred';")
 
     echo -e "  ${BOLD}$local_rid${NC} [$mode_color] pending:$local_pending active:$local_active deferred:$local_deferred"
@@ -64,8 +64,8 @@ echo ""
 echo -e "${BOLD}PIPELINE${NC}"
 echo -e "${DIM}──────────────────────────────────────${NC}"
 
-local_total=$(sqlite3 "$KODO_DB" "SELECT COUNT(*) FROM pipeline_state;")
-local_by_state=$(sqlite3 "$KODO_DB" "SELECT state, COUNT(*) FROM pipeline_state GROUP BY state ORDER BY COUNT(*) DESC;")
+local_total=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state;")
+local_by_state=$(kodo_sql "SELECT state, COUNT(*) FROM pipeline_state GROUP BY state ORDER BY COUNT(*) DESC;")
 
 if [[ -z "$local_by_state" ]]; then
     echo -e "  ${DIM}(empty)${NC}"
@@ -89,7 +89,7 @@ echo ""
 echo -e "${BOLD}ACTIVE EVENTS${NC}"
 echo -e "${DIM}──────────────────────────────────────${NC}"
 
-local_active_events=$(sqlite3 "$KODO_DB" "SELECT event_id, repo, domain, state, updated_at
+local_active_events=$(kodo_sql "SELECT event_id, repo, domain, state, updated_at
     FROM pipeline_state
     WHERE state NOT IN ('resolved', 'closed', 'published', 'reported')
     ORDER BY updated_at DESC LIMIT 10;")
@@ -118,11 +118,11 @@ for model_info in "claude:200" "codex:20" "gemini:0" "qwen:0"; do
     local_model="${model_info%%:*}"
     local_limit="${model_info#*:}"
 
-    local_spent=$(sqlite3 "$KODO_DB" "SELECT COALESCE(SUM(cost_usd), 0.0)
+    local_spent=$(kodo_sql "SELECT COALESCE(SUM(cost_usd), 0.0)
         FROM budget_ledger
         WHERE model = '$local_model' AND invoked_at > date('now', 'start of month');")
 
-    local_calls=$(sqlite3 "$KODO_DB" "SELECT COUNT(*)
+    local_calls=$(kodo_sql "SELECT COUNT(*)
         FROM budget_ledger
         WHERE model = '$local_model' AND invoked_at > date('now', 'start of month');")
 
@@ -153,7 +153,7 @@ echo ""
 echo -e "${BOLD}RECENT DEFERRALS${NC} ${DIM}(last 24h)${NC}"
 echo -e "${DIM}──────────────────────────────────────${NC}"
 
-local_recent=$(sqlite3 "$KODO_DB" "SELECT event_id, repo, domain, reason
+local_recent=$(kodo_sql "SELECT event_id, repo, domain, reason
     FROM deferred_queue
     WHERE queued_at > datetime('now', '-1 day')
     ORDER BY queued_at DESC LIMIT 5;")

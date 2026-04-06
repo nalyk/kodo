@@ -102,7 +102,7 @@ _KODO PM triage_"
         done
 
         # Store triage artifact
-        sqlite3 "$KODO_DB" "INSERT INTO pm_artifacts (repo, type, data_json)
+        kodo_sql "INSERT INTO pm_artifacts (repo, type, data_json)
             VALUES ('$(kodo_sql_escape "$repo_id")', 'triage', '$(kodo_sql_escape "$triage_output")');"
 
         kodo_log "PM: triage complete for $repo_id"
@@ -132,7 +132,7 @@ do_weekly_report() {
 
     # Get metrics from DB
     local metrics
-    metrics=$(sqlite3 "$KODO_DB" "SELECT merge_count, avg_confidence, avg_time_to_merge, incident_rate_30d
+    metrics=$(kodo_sql "SELECT merge_count, avg_confidence, avg_time_to_merge, incident_rate_30d
         FROM repo_metrics WHERE repo = '$(kodo_sql_escape "$repo_id")';" 2>/dev/null) || metrics=""
 
     # Load domain knowledge if exists
@@ -179,7 +179,7 @@ Analyze: velocity trends, priority recommendations, roadmap status, technical de
     ' 2>/dev/null) || report_body="Report generation error"
 
     # Store artifact
-    sqlite3 "$KODO_DB" "INSERT INTO pm_artifacts (repo, type, data_json)
+    kodo_sql "INSERT INTO pm_artifacts (repo, type, data_json)
         VALUES ('$(kodo_sql_escape "$repo_id")', 'weekly', '$(kodo_sql_escape "$report")');"
 
     # Send Telegram digest if enabled
@@ -203,7 +203,7 @@ do_event() {
     export KODO_TRANSITION_REPO="$repo_id"
 
     local state
-    state=$(sqlite3 "$KODO_DB" "SELECT state FROM pipeline_state
+    state=$(kodo_sql "SELECT state FROM pipeline_state
         WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = 'pm';")
 
     case "$state" in
@@ -225,7 +225,7 @@ do_event() {
                 }
                 kodo_log_budget "claude" "$repo_id" "pm" 0 0 1.00
 
-                sqlite3 "$KODO_DB" "INSERT INTO pm_artifacts (repo, type, data_json)
+                kodo_sql "INSERT INTO pm_artifacts (repo, type, data_json)
                     VALUES ('$(kodo_sql_escape "$repo_id")', 'evaluation', '$(kodo_sql_escape "$result")');"
             fi
 

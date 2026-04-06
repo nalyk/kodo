@@ -100,7 +100,7 @@ apply_transition() {
     # Special: deferred→pending increments retry_count, max 2
     if [[ "$from" == "deferred" && "$to" == "pending" ]]; then
         local retry_count
-        retry_count=$(sqlite3 "$KODO_DB" "SELECT retry_count FROM pipeline_state
+        retry_count=$(kodo_sql "SELECT retry_count FROM pipeline_state
             WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")';")
         if [[ "$retry_count" -ge 2 ]]; then
             kodo_log "MAX RETRIES: $event_id ($domain) — forcing closed"
@@ -110,7 +110,7 @@ apply_transition() {
 
     # Initial state creation (*→pending)
     if [[ "$from" == "*" && "$to" == "pending" ]]; then
-        sqlite3 "$KODO_DB" "INSERT OR IGNORE INTO pipeline_state (event_id, repo, domain, state)
+        kodo_sql "INSERT OR IGNORE INTO pipeline_state (event_id, repo, domain, state)
             VALUES (
                 '$(kodo_sql_escape "$event_id")',
                 '$(kodo_sql_escape "${KODO_TRANSITION_REPO:-unknown}")',
@@ -123,7 +123,7 @@ apply_transition() {
 
     # Verify current state matches expected
     local current_state
-    current_state=$(sqlite3 "$KODO_DB" "SELECT state FROM pipeline_state
+    current_state=$(kodo_sql "SELECT state FROM pipeline_state
         WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")';")
 
     if [[ "$current_state" != "$from" ]]; then
@@ -137,7 +137,7 @@ apply_transition() {
         retry_increment=", retry_count = retry_count + 1"
     fi
 
-    sqlite3 "$KODO_DB" "UPDATE pipeline_state
+    kodo_sql "UPDATE pipeline_state
         SET state = '$(kodo_sql_escape "$to")', updated_at = datetime('now') $retry_increment
         WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")';"
 

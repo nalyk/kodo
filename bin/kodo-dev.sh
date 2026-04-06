@@ -28,14 +28,14 @@ export KODO_TRANSITION_REPO="$REPO_ID"
 # ── State Reader ─────────────────────────────────────────────
 
 get_state() {
-    sqlite3 "$KODO_DB" "SELECT state FROM pipeline_state
+    kodo_sql "SELECT state FROM pipeline_state
         WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND domain = 'dev';"
 }
 
 get_payload() {
-    sqlite3 "$KODO_DB" "SELECT payload_json FROM pending_events
+    kodo_sql "SELECT payload_json FROM pending_events
         WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")';" 2>/dev/null || \
-    sqlite3 "$KODO_DB" "SELECT '{}'"
+    kodo_sql "SELECT '{}'"
 }
 
 transition() {
@@ -45,7 +45,7 @@ transition() {
 defer() {
     local reason="$1"
     transition "$(get_state)" "deferred"
-    sqlite3 "$KODO_DB" "INSERT INTO deferred_queue (event_id, repo, domain, reason)
+    kodo_sql "INSERT INTO deferred_queue (event_id, repo, domain, reason)
         VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', 'dev', '$(kodo_sql_escape "$reason")');"
     kodo_log "DEV: deferred $EVENT_ID — $reason"
 }
@@ -259,11 +259,11 @@ do_scanning() {
 
     # Retrieve auto_merge threshold from confidence_bands
     local auto_merge_threshold
-    auto_merge_threshold=$(sqlite3 "$KODO_DB" "SELECT threshold FROM confidence_bands WHERE band = 'auto_merge';")
+    auto_merge_threshold=$(kodo_sql "SELECT threshold FROM confidence_bands WHERE band = 'auto_merge';")
     auto_merge_threshold="${auto_merge_threshold:-90}"
 
     local ballot_threshold
-    ballot_threshold=$(sqlite3 "$KODO_DB" "SELECT threshold FROM confidence_bands WHERE band = 'ballot';")
+    ballot_threshold=$(kodo_sql "SELECT threshold FROM confidence_bands WHERE band = 'ballot';")
     ballot_threshold="${ballot_threshold:-50}"
 
     # Get confidence from last audit (stored in pipeline or recompute)
@@ -372,7 +372,7 @@ do_auto_merge() {
     }
 
     # Record merge outcome
-    sqlite3 "$KODO_DB" "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
+    kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
         VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', 90, 'clean');"
 
     transition "auto_merge" "releasing"
@@ -396,7 +396,7 @@ do_guarded_merge() {
         return
     }
 
-    sqlite3 "$KODO_DB" "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
+    kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
         VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', 75, 'clean');"
 
     transition "guarded_merge" "releasing"

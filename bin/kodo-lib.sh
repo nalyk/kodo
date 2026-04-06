@@ -9,11 +9,18 @@ readonly KODO_LOCK_DIR="$KODO_HOME"
 readonly KODO_LOG_DIR="$KODO_HOME/logs"
 
 # Initialize database if it doesn't exist
+# WAL mode + busy timeout for concurrent access from multiple engines
 kodo_init_db() {
     if [[ ! -f "$KODO_DB" ]]; then
         mkdir -p "$(dirname "$KODO_DB")"
         sqlite3 "$KODO_DB" < "$KODO_HOME/sql/schema.sql"
     fi
+    sqlite3 "$KODO_DB" "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;" >/dev/null 2>&1
+}
+
+# SQLite wrapper with busy timeout (5s wait on lock instead of instant fail)
+kodo_sql() {
+    sqlite3 -cmd ".timeout 5000" "$KODO_DB" "$1"
 }
 
 # Parse a value from a flat TOML file
@@ -38,7 +45,7 @@ kodo_toml_bool() {
 kodo_log_budget() {
     local model="$1" repo="$2" domain="$3"
     local tokens_in="${4:-0}" tokens_out="${5:-0}" cost_usd="${6:-0.0}"
-    sqlite3 "$KODO_DB" "INSERT INTO budget_ledger (model, repo, domain, tokens_in, tokens_out, cost_usd)
+    kodo_sql "INSERT INTO budget_ledger (model, repo, domain, tokens_in, tokens_out, cost_usd)
         VALUES ('${model//\'/\'\'}', '${repo//\'/\'\'}', '${domain//\'/\'\'}', $tokens_in, $tokens_out, $cost_usd);"
 }
 
@@ -56,7 +63,7 @@ kodo_is_shadow() {
 kodo_check_budget() {
     local model="$1" limit="$2"
     local spent
-    spent=$(sqlite3 "$KODO_DB" "SELECT COALESCE(SUM(cost_usd), 0.0)
+    spent=$(kodo_sql "SELECT COALESCE(SUM(cost_usd), 0.0)
         FROM budget_ledger
         WHERE model = '${model//\'/\'\'}' AND invoked_at > date('now', 'start of month');")
     awk "BEGIN { exit ($spent >= $limit) ? 1 : 0 }"
