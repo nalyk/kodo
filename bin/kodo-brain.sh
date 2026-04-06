@@ -204,7 +204,7 @@ main() {
                 kodo_log "BRAIN: reaping dead PID $pid for $event_id [$domain]"
                 kodo_sql "UPDATE pipeline_state SET processing_pid = NULL, updated_at = datetime('now')
                     WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")'
-                    AND processing_pid = '${pid}';"
+                    AND processing_pid = '$(kodo_sql_escape "$pid")';"
             fi
         done <<< "$stale_pids"
     fi
