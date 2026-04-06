@@ -51,7 +51,9 @@ _gh_pr_comment() {
 
 _gh_pr_merge() {
     local slug="$1" pr_num="$2"
-    gh pr merge "$pr_num" --repo "$slug" --merge --auto
+    # No --auto: KODO already verified CI green before calling merge.
+    # --auto queues for later; without it, merge executes immediately.
+    gh pr merge "$pr_num" --repo "$slug" --merge
 }
 
 # Check CI status for a PR
