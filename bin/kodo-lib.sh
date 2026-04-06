@@ -376,19 +376,31 @@ kodo_invoke_llm() {
         return 1
     fi
 
+    local llm_stderr_file
+    llm_stderr_file=$(mktemp)
+
     case "$cli" in
         claude)
             if [[ -n "$schema_content" ]]; then
                 raw_output=$(timeout "$timeout_s" claude -p "$prompt" \
                     --json-schema "$schema_content" \
                     --output-format json \
-                    --max-turns "$max_turns" 2>/dev/null) || { _llm_log_fail "$cli" "$repo" "$domain"; return 1; }
+                    --max-turns "$max_turns" 2>"$llm_stderr_file") || {
+                    _llm_log_fail "$cli" "$repo" "$domain" "exit=$? $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
+                    rm -f "$llm_stderr_file"; return 1
+                }
                 result=$(echo "$raw_output" | jq -c '.structured_output // empty' 2>/dev/null)
-                [[ "$result" == "null" || -z "$result" ]] && { _llm_log_fail "$cli" "$repo" "$domain"; return 1; }
+                [[ "$result" == "null" || -z "$result" ]] && {
+                    _llm_log_fail "$cli" "$repo" "$domain" "no structured_output in response"
+                    rm -f "$llm_stderr_file"; return 1
+                }
             else
                 raw_output=$(timeout "$timeout_s" claude -p "$prompt" \
                     --output-format json \
-                    --max-turns "$max_turns" 2>/dev/null) || { _llm_log_fail "$cli" "$repo" "$domain"; return 1; }
+                    --max-turns "$max_turns" 2>"$llm_stderr_file") || {
+                    _llm_log_fail "$cli" "$repo" "$domain" "exit=$? $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
+                    rm -f "$llm_stderr_file"; return 1
+                }
                 local text_result
                 text_result=$(echo "$raw_output" | jq -r '.result // empty' 2>/dev/null)
                 result=$(_extract_json "$text_result") || result=""
@@ -405,8 +417,14 @@ kodo_invoke_llm() {
 CRITICAL INSTRUCTION: Respond with ONLY a raw JSON object. No markdown, no code fences, no explanation, no preamble. Output must be valid JSON matching this schema:
 ${schema_content}"
             fi
-            raw_output=$(timeout "$timeout_s" "$cli" -p "$structured_prompt" 2>/dev/null) || { _llm_log_fail "$cli" "$repo" "$domain"; return 1; }
-            result=$(_extract_json "$raw_output") || { _llm_log_fail "$cli" "$repo" "$domain"; return 1; }
+            raw_output=$(timeout "$timeout_s" "$cli" -p "$structured_prompt" 2>"$llm_stderr_file") || {
+                _llm_log_fail "$cli" "$repo" "$domain" "exit=$? $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
+                rm -f "$llm_stderr_file"; return 1
+            }
+            result=$(_extract_json "$raw_output") || {
+                _llm_log_fail "$cli" "$repo" "$domain" "json extraction failed"
+                rm -f "$llm_stderr_file"; return 1
+            }
             ;;
         codex)
             local structured_prompt="$prompt"
@@ -415,12 +433,20 @@ ${schema_content}"
 
 Respond with ONLY valid JSON matching this schema: ${schema_content}"
             fi
-            raw_output=$(timeout "$timeout_s" codex exec "$structured_prompt" 2>/dev/null) || { _llm_log_fail "$cli" "$repo" "$domain"; return 1; }
-            result=$(_extract_json "$raw_output") || { _llm_log_fail "$cli" "$repo" "$domain"; return 1; }
+            raw_output=$(timeout "$timeout_s" codex exec "$structured_prompt" 2>"$llm_stderr_file") || {
+                _llm_log_fail "$cli" "$repo" "$domain" "exit=$? $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
+                rm -f "$llm_stderr_file"; return 1
+            }
+            result=$(_extract_json "$raw_output") || {
+                _llm_log_fail "$cli" "$repo" "$domain" "json extraction failed"
+                rm -f "$llm_stderr_file"; return 1
+            }
             cost=0.10
             ;;
-        *) return 1 ;;
+        *) rm -f "$llm_stderr_file"; return 1 ;;
     esac
+
+    rm -f "$llm_stderr_file"
 
     # Log budget
     if [[ -n "$repo" && -n "$domain" ]]; then
@@ -434,7 +460,12 @@ Respond with ONLY valid JSON matching this schema: ${schema_content}"
 }
 
 _llm_log_fail() {
-    kodo_log "LLM: $1 invocation failed (repo: ${2:-?}, domain: ${3:-?})"
+    local cli="${1:-?}" repo="${2:-?}" domain="${3:-?}" reason="${4:-unknown}"
+    kodo_log "LLM: $cli invocation failed (repo: $repo, domain: $domain, reason: $reason)"
+    # Log failed attempts to budget_ledger for visibility (cost=0)
+    if [[ "$repo" != "?" && "$domain" != "?" ]]; then
+        kodo_log_budget "$cli" "$repo" "$domain" 0 0 0.0 2>/dev/null || true
+    fi
 }
 
 # ── Pipeline Metadata ───────────────────────────────────────

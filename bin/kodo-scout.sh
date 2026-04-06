@@ -20,20 +20,23 @@ _event_key() {
 }
 
 # Check if event already exists in pending_events or pipeline_state
+# Uses a single SELECT to avoid multi-row parsing fragility
 _event_exists() {
     local event_id="$1"
+    local eid
+    eid="$(kodo_sql_escape "$event_id")"
     local count
-    count=$(kodo_sql "SELECT COUNT(*) FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")'
-        UNION ALL
-        SELECT COUNT(*) FROM pipeline_state WHERE event_id = '$(kodo_sql_escape "$event_id")';" \
-        | awk '{s+=$1} END{print s}')
-    [[ "$count" -gt 0 ]]
+    count=$(kodo_sql "SELECT
+        (SELECT COUNT(*) FROM pending_events WHERE event_id = '${eid}')
+      + (SELECT COUNT(*) FROM pipeline_state WHERE event_id = '${eid}');" 2>/dev/null) || count=1
+    # Default to "exists" on DB error — safer than re-inserting duplicates
+    [[ "${count:-1}" -gt 0 ]]
 }
 
-# Insert a new pending event
+# Insert a new pending event (OR IGNORE prevents crash on race-condition duplicates)
 _insert_event() {
     local event_id="$1" repo="$2" event_type="$3" payload="$4"
-    kodo_sql "INSERT INTO pending_events (event_id, repo, event_type, payload_json)
+    kodo_sql "INSERT OR IGNORE INTO pending_events (event_id, repo, event_type, payload_json)
         VALUES ('$(kodo_sql_escape "$event_id")', '$(kodo_sql_escape "$repo")', '$(kodo_sql_escape "$event_type")', '$(kodo_sql_escape "$payload")');"
     kodo_log "SCOUT: detected $event_type on $repo → $event_id"
 }
@@ -105,7 +108,7 @@ scan_milestones() {
     local milestones
     milestones=$("$SCRIPT_DIR/kodo-git.sh" milestone-list "$toml" 2>/dev/null) || return 0
 
-    echo "$milestones" | jq -c '.' 2>/dev/null | while IFS= read -r ms; do
+    echo "$milestones" | jq -c 'if type == "array" then .[] else . end' 2>/dev/null | while IFS= read -r ms; do
         local ms_num
         ms_num=$(echo "$ms" | jq -r '.number')
 
