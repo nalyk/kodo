@@ -62,15 +62,16 @@ Issues:
 $(echo "$issues" | jq -c '.[] | {number, title, labels: [.labels[]?.name], created: .createdAt, comments: (.comments // 0)}' 2>/dev/null)")"
 
         local triage_output
-        if kodo_cli_available qwen; then
-            triage_output=$(timeout 120 qwen -p "$prompt" \
-                --json-schema "$KODO_HOME/schemas/triage.schema.json" 2>/dev/null) || triage_output=""
-            kodo_log_budget "qwen" "$repo_id" "pm" 0 0 0.0
-        else
-            triage_output=$(timeout 120 gemini -p "$prompt" \
-                --json-schema "$KODO_HOME/schemas/triage.schema.json" 2>/dev/null) || triage_output=""
-            kodo_log_budget "gemini" "$repo_id" "pm" 0 0 0.0
+        local triage_cli="qwen"
+        if ! kodo_cli_available qwen; then
+            triage_cli="gemini"
         fi
+
+        triage_output=$(kodo_invoke_llm "$triage_cli" "$prompt" \
+            --schema "$KODO_HOME/schemas/triage.schema.json" \
+            --timeout 120 \
+            --repo "$repo_id" \
+            --domain "pm") || triage_output=""
 
         if [[ -z "$triage_output" ]]; then
             kodo_log "PM: triage failed for $repo_id"
@@ -160,13 +161,14 @@ $domain_knowledge}
 Analyze: velocity trends, priority recommendations, roadmap status, technical debt candidates.")"
 
     local report
-    report=$(timeout 180 claude -p "$prompt" \
-        --json-schema "$KODO_HOME/schemas/pm-report.schema.json" \
-        --max-turns 3 2>/dev/null) || {
+    report=$(kodo_invoke_llm claude "$prompt" \
+        --schema "$KODO_HOME/schemas/pm-report.schema.json" \
+        --timeout 180 \
+        --repo "$repo_id" \
+        --domain "pm") || {
         kodo_log "PM: weekly report generation failed for $repo_id"
         return
     }
-    kodo_log_budget "claude" "$repo_id" "pm" 0 0 1.50
 
     # Post report as GitHub issue
     local report_body
@@ -217,13 +219,14 @@ do_event() {
                 prompt="$(kodo_prompt "Evaluate this event for $repo_slug. Assess feasibility, alignment, effort, and priority.")"
 
                 local result
-                result=$(timeout 120 claude -p "$prompt" \
-                    --json-schema "$KODO_HOME/schemas/pm-report.schema.json" \
-                    --max-turns 2 2>/dev/null) || {
+                result=$(kodo_invoke_llm claude "$prompt" \
+                    --schema "$KODO_HOME/schemas/pm-report.schema.json" \
+                    --timeout 120 \
+                    --repo "$repo_id" \
+                    --domain "pm") || {
                     "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "deferred" "pm"
                     return
                 }
-                kodo_log_budget "claude" "$repo_id" "pm" 0 0 1.00
 
                 kodo_sql "INSERT INTO pm_artifacts (repo, type, data_json)
                     VALUES ('$(kodo_sql_escape "$repo_id")', 'evaluation', '$(kodo_sql_escape "$result")');"

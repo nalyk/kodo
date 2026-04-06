@@ -33,9 +33,8 @@ get_state() {
 }
 
 get_payload() {
-    kodo_sql "SELECT payload_json FROM pending_events
-        WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")';" 2>/dev/null || \
-    kodo_sql "SELECT '{}'"
+    kodo_sql "SELECT payload_json FROM pipeline_state
+        WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND domain = 'dev';"
 }
 
 transition() {
@@ -68,36 +67,75 @@ do_triaging() {
     kodo_log "DEV: triaging $EVENT_ID"
     local payload
     payload="$(get_payload)"
-    local event_type
-    event_type=$(echo "$payload" | jq -r '.event_type // "PullRequestEvent"' 2>/dev/null)
 
-    # Determine path based on event type and content
+    # Distinguish PR vs Issue from event_id (deterministic, not payload-dependent)
+    local is_pr=false
+    [[ "$EVENT_ID" == *"PullRequestEvent"* ]] && is_pr=true
+
+    if $is_pr; then
+        _triage_pr "$payload"
+    else
+        _triage_issue "$payload"
+    fi
+}
+
+_triage_pr() {
+    local payload="$1"
     local pr_num
     pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
 
-    if [[ -n "$pr_num" ]]; then
-        # Check if this is a deps update (auto-merge path)
-        local title
-        title=$(echo "$payload" | jq -r '.title // ""' 2>/dev/null | tr '[:upper:]' '[:lower:]')
-        local labels
-        labels=$(echo "$payload" | jq -r '(.labels // [])[] | if type == "object" then .name else . end' 2>/dev/null | tr '[:upper:]' '[:lower:]')
-
-        if kodo_toml_bool "$REPO_TOML" "auto_merge_deps"; then
-            if [[ "$title" == *"dependabot"* || "$title" == *"renovate"* || \
-                  "$title" == *"bump "* || "$title" == *"update "* || \
-                  "$labels" == *"dependencies"* ]]; then
-                kodo_log "DEV: deps update detected — auto_merge path"
-                transition "triaging" "auto_merge"
-                return
-            fi
-        fi
-
-        # PR: go to auditing (review)
-        transition "triaging" "auditing"
-    else
-        # Issue: go to generating (code fix)
-        transition "triaging" "generating"
+    if [[ -z "$pr_num" ]]; then
+        defer "PR event but no number in payload"
+        return
     fi
+
+    local title
+    title=$(echo "$payload" | jq -r '.title // ""' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    local labels
+    labels=$(echo "$payload" | jq -r '(.labels // [])[] | if type == "object" then .name else . end' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    local author_login
+    author_login=$(echo "$payload" | jq -r '.author.login // ""' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+
+    # Deps auto-merge fast path (zero LLM)
+    if kodo_toml_bool "$REPO_TOML" "auto_merge_deps"; then
+        if [[ "$title" == *"dependabot"* || "$title" == *"renovate"* || \
+              "$title" == *"bump "* || "$title" == *"chore(deps)"* || \
+              "$labels" == *"dependencies"* || \
+              "$author_login" == *"dependabot"* || "$author_login" == *"renovate"* ]]; then
+            kodo_log "DEV: deps PR #$pr_num ($author_login) — auto_merge path"
+            transition "triaging" "auto_merge"
+            return
+        fi
+    fi
+
+    kodo_log "DEV: PR #$pr_num — auditing path (code review)"
+    transition "triaging" "auditing"
+}
+
+_triage_issue() {
+    local payload="$1"
+    local labels
+    labels=$(echo "$payload" | jq -r '(.labels // [])[] | if type == "object" then .name else . end' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    local issue_num
+    issue_num=$(echo "$payload" | jq -r '.number // "?"' 2>/dev/null)
+
+    # Documentation issues → no code action, defer with explanation
+    if [[ "$labels" == *"documentation"* || "$labels" == *"docs"* ]]; then
+        kodo_log "DEV: issue #$issue_num — documentation, not actionable by dev engine"
+        defer "documentation issue — no code action needed"
+        return
+    fi
+
+    # Duplicate/wontfix → skip
+    if [[ "$labels" == *"duplicate"* || "$labels" == *"wontfix"* || "$labels" == *"invalid"* ]]; then
+        kodo_log "DEV: issue #$issue_num — skipping ($labels)"
+        defer "issue not actionable: $labels"
+        return
+    fi
+
+    # Bug/fix/test/enhancement → code generation
+    kodo_log "DEV: issue #$issue_num — generating path (code fix)"
+    transition "triaging" "generating"
 }
 
 do_generating() {
@@ -192,61 +230,85 @@ do_auditing() {
 
     local confidence=0
     local review_output=""
+    local review_model="none"
 
     if _claude_available; then
+        review_model="claude"
         local diff=""
-        if [[ -n "$pr_num" ]]; then
+        if [[ -n "$pr_num" && "$EVENT_ID" == *"PullRequestEvent"* ]]; then
             diff=$("$SCRIPT_DIR/kodo-git.sh" pr-diff "$REPO_TOML" "$pr_num" 2>/dev/null | head -500) || diff=""
         fi
 
+        local pr_title
+        pr_title=$(echo "$payload" | jq -r '.title // "unknown"' 2>/dev/null)
+
         local prompt
         prompt="$(kodo_prompt "Review this PR for $REPO_SLUG.
-Title: $(echo "$payload" | jq -r '.title // "unknown"')
+Title: $pr_title
 
 Diff (truncated):
 $diff
 
 Score confidence 0-100 for merge safety. Identify risks and behavioral changes.")"
 
-        review_output=$(timeout 120 claude -p "$prompt" \
-            --json-schema "$KODO_HOME/schemas/confidence.schema.json" \
-            --max-turns 3 2>/dev/null) || review_output=""
+        review_output=$(kodo_invoke_llm claude "$prompt" \
+            --schema "$KODO_HOME/schemas/confidence.schema.json" \
+            --timeout 300 \
+            --repo "$REPO_ID" \
+            --domain "dev") || review_output=""
 
         if [[ -n "$review_output" ]]; then
             confidence=$(echo "$review_output" | jq -r '.score // 0' 2>/dev/null)
-            kodo_log_budget "claude" "$REPO_ID" "dev" 0 0 1.00
         fi
     elif kodo_cli_available codex; then
-        # Fallback: codex as emergency reviewer, confidence capped at 79
-        kodo_log "DEV: claude unavailable — using codex (confidence capped at 79)"
-        review_output=$(timeout 120 codex exec "Review this PR for correctness and security" 2>/dev/null) || review_output=""
-        confidence=70
-        if [[ "$confidence" -gt 79 ]]; then
-            confidence=79
+        # Fallback: codex emergency reviewer — confidence capped at 79
+        review_model="codex"
+        kodo_log "DEV: claude unavailable — codex emergency review (cap 79)"
+        local codex_result
+        codex_result=$(kodo_invoke_llm codex "Review this code change for correctness and security. Assess merge safety." \
+            --schema "$KODO_HOME/schemas/confidence.schema.json" \
+            --timeout 120 \
+            --repo "$REPO_ID" \
+            --domain "dev") || codex_result=""
+        if [[ -n "$codex_result" ]]; then
+            confidence=$(echo "$codex_result" | jq -r '.score // 70' 2>/dev/null)
+            [[ "$confidence" -gt 79 ]] && confidence=79
+            review_output="$codex_result"
+        else
+            confidence=70
         fi
-        kodo_log_budget "codex" "$REPO_ID" "dev" 0 0 0.10
     else
         defer "no review CLI available"
         return
     fi
 
-    kodo_log "DEV: confidence=$confidence for $EVENT_ID"
+    kodo_log "DEV: confidence=$confidence model=$review_model for $EVENT_ID"
+
+    # Persist confidence + model in metadata for downstream states (scanning, balloting)
+    kodo_pipeline_set "$EVENT_ID" "dev" "confidence" "$confidence"
+    kodo_pipeline_set "$EVENT_ID" "dev" "review_model" "$review_model"
 
     if [[ "$confidence" -lt 50 ]]; then
         defer "confidence too low: $confidence"
         return
     fi
 
-    # Post review comment
+    # Post review comment on PR (shadow mode handled by kodo-git.sh)
     if [[ -n "$pr_num" && -n "$review_output" ]]; then
         local summary
         summary=$(echo "$review_output" | jq -r '.summary // "Review completed"' 2>/dev/null)
-        local comment="**KODO Dev Review** | Confidence: **${confidence}/100**
+        local risks
+        risks=$(echo "$review_output" | jq -r '(.risks // [])[] | "- [\(.severity)] \(.description)"' 2>/dev/null)
 
-$summary
+        local comment="**KŌDŌ Dev Review** | Confidence: **${confidence}/100** | Model: \`${review_model}\`
+
+${summary}
+${risks:+
+**Risks:**
+$risks}
 
 ---
-_Event: $EVENT_ID | Model: claude_"
+_Event: ${EVENT_ID}_"
 
         "$SCRIPT_DIR/kodo-git.sh" pr-comment "$REPO_TOML" "$pr_num" "$comment" 2>/dev/null || true
     fi
@@ -257,7 +319,7 @@ _Event: $EVENT_ID | Model: claude_"
 do_scanning() {
     kodo_log "DEV: security scanning $EVENT_ID"
 
-    # Retrieve auto_merge threshold from confidence_bands
+    # Read adaptive thresholds from DB
     local auto_merge_threshold
     auto_merge_threshold=$(kodo_sql "SELECT threshold FROM confidence_bands WHERE band = 'auto_merge';")
     auto_merge_threshold="${auto_merge_threshold:-90}"
@@ -266,17 +328,53 @@ do_scanning() {
     ballot_threshold=$(kodo_sql "SELECT threshold FROM confidence_bands WHERE band = 'ballot';")
     ballot_threshold="${ballot_threshold:-50}"
 
-    # Get confidence from last audit (stored in pipeline or recompute)
-    # For simplicity, re-read from review output or use a default
-    local confidence=75
+    # Read REAL confidence from auditing step (via pipeline metadata)
+    local confidence
+    confidence=$(kodo_pipeline_get "$EVENT_ID" "dev" "confidence")
+    confidence="${confidence:-0}"
 
-    # TODO: Run semgrep / npm audit security scan here
+    local review_model
+    review_model=$(kodo_pipeline_get "$EVENT_ID" "dev" "review_model")
+
+    # Security scan: semgrep on diff if available
     local scan_clean=true
+    local scan_findings=""
 
-    if [[ "$scan_clean" != "true" ]]; then
-        defer "security vulnerability found"
+    if command -v semgrep >/dev/null 2>&1; then
+        local payload pr_num
+        payload="$(get_payload)"
+        pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+
+        if [[ -n "$pr_num" && "$EVENT_ID" == *"PullRequestEvent"* ]]; then
+            local diff_files
+            diff_files=$("$SCRIPT_DIR/kodo-git.sh" pr-diff "$REPO_TOML" "$pr_num" 2>/dev/null \
+                | grep '^+++ b/' | sed 's|^+++ b/||' | head -20) || diff_files=""
+
+            if [[ -n "$diff_files" ]]; then
+                kodo_log "DEV: running semgrep on changed files"
+                scan_findings=$(echo "$diff_files" | xargs semgrep --config=auto --json 2>/dev/null \
+                    | jq '.results | length' 2>/dev/null) || scan_findings="0"
+
+                if [[ "$scan_findings" -gt 0 ]]; then
+                    scan_clean=false
+                    kodo_log "DEV: semgrep found $scan_findings issues"
+                    # Reduce confidence proportionally
+                    local penalty=$((scan_findings * 10))
+                    confidence=$((confidence > penalty ? confidence - penalty : 0))
+                    kodo_pipeline_set "$EVENT_ID" "dev" "scan_findings" "$scan_findings"
+                fi
+            fi
+        fi
+    fi
+
+    kodo_pipeline_set "$EVENT_ID" "dev" "scan_clean" "$scan_clean"
+
+    if [[ "$scan_clean" != "true" && "$scan_findings" -gt 5 ]]; then
+        defer "security scan: $scan_findings findings (critical)"
         return
     fi
+
+    kodo_log "DEV: scan done — confidence=$confidence (model=$review_model) auto>=$auto_merge_threshold ballot>=$ballot_threshold"
 
     if [[ "$confidence" -ge "$auto_merge_threshold" ]]; then
         kodo_log "DEV: confidence $confidence >= $auto_merge_threshold — auto_merge"
@@ -285,15 +383,17 @@ do_scanning() {
         kodo_log "DEV: confidence $confidence [$ballot_threshold-$auto_merge_threshold) — balloting"
         transition "scanning" "balloting"
     else
-        defer "confidence below ballot threshold: $confidence"
+        defer "confidence below ballot threshold: $confidence (scan_findings: ${scan_findings:-0})"
     fi
 }
 
 do_balloting() {
-    kodo_log "DEV: balloting $EVENT_ID (2/3 consensus)"
+    kodo_log "DEV: balloting $EVENT_ID (2/3 consensus required)"
 
     local votes=0
     local total=0
+    local vote_log=""
+
     local payload pr_num
     payload="$(get_payload)"
     pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
@@ -303,51 +403,68 @@ do_balloting() {
         diff=$("$SCRIPT_DIR/kodo-git.sh" pr-diff "$REPO_TOML" "$pr_num" 2>/dev/null | head -300) || diff=""
     fi
 
-    local ballot_prompt
-    ballot_prompt="$(kodo_prompt "Review this code change. Is it safe to merge? Respond with confidence score 0-100.")"
+    local pr_title
+    pr_title=$(echo "$payload" | jq -r '.title // "unknown"' 2>/dev/null)
 
-    # Vote 1: Claude (if available)
-    if _claude_available; then
+    local ballot_prompt
+    ballot_prompt="$(kodo_prompt "You are voting on whether to merge this code change to $REPO_SLUG.
+
+Title: $pr_title
+
+Diff:
+$diff
+
+Review the change for correctness, security, and safety. Cast your vote.")"
+
+    local ballot_schema="$KODO_HOME/schemas/ballot.schema.json"
+
+    # Collect structured votes from each available CLI
+    _cast_ballot() {
+        local cli="$1"
         local result
-        result=$(timeout 120 claude -p "$ballot_prompt
-$diff" --json-schema "$KODO_HOME/schemas/confidence.schema.json" --max-turns 1 2>/dev/null) || result=""
-        if [[ -n "$result" ]]; then
-            local score
-            score=$(echo "$result" | jq -r '.score // 0' 2>/dev/null)
-            [[ "$score" -ge 50 ]] && votes=$((votes + 1))
-            total=$((total + 1))
-            kodo_log_budget "claude" "$REPO_ID" "dev" 0 0 0.50
-        fi
+        result=$(kodo_invoke_llm "$cli" "$ballot_prompt" \
+            --schema "$ballot_schema" \
+            --timeout 120 \
+            --repo "$REPO_ID" \
+            --domain "dev") || return 1
+
+        local vote score reason
+        vote=$(echo "$result" | jq -r '.vote // "reject"' 2>/dev/null)
+        score=$(echo "$result" | jq -r '.score // 0' 2>/dev/null)
+        reason=$(echo "$result" | jq -r '.reason // "no reason"' 2>/dev/null | head -c 120)
+
+        kodo_log "DEV: ballot $cli: $vote ($score) — $reason"
+        vote_log="${vote_log}${cli}:${vote}:${score} "
+        total=$((total + 1))
+        [[ "$vote" == "approve" && "$score" -ge 50 ]] && votes=$((votes + 1))
+    }
+
+    # Vote 1: Claude
+    if _claude_available; then
+        _cast_ballot "claude"
     fi
 
     # Vote 2: Gemini (free)
     if kodo_cli_available gemini; then
-        local result
-        result=$(timeout 120 gemini -p "$ballot_prompt
-$diff" 2>/dev/null) || result=""
-        if [[ -n "$result" ]]; then
-            # Parse a simple yes/no from free-form (best effort for ballot)
-            [[ "$result" == *"safe"* || "$result" == *"approve"* || "$result" == *"merge"* ]] && votes=$((votes + 1))
-            total=$((total + 1))
-            kodo_log_budget "gemini" "$REPO_ID" "dev" 0 0 0.0
-        fi
+        _cast_ballot "gemini"
     fi
 
     # Vote 3: Qwen (free)
     if kodo_cli_available qwen; then
-        local result
-        result=$(timeout 120 qwen -p "$ballot_prompt
-$diff" 2>/dev/null) || result=""
-        if [[ -n "$result" ]]; then
-            [[ "$result" == *"safe"* || "$result" == *"approve"* || "$result" == *"merge"* ]] && votes=$((votes + 1))
-            total=$((total + 1))
-            kodo_log_budget "qwen" "$REPO_ID" "dev" 0 0 0.0
-        fi
+        _cast_ballot "qwen"
     fi
 
-    kodo_log "DEV: ballot result $votes/$total"
+    kodo_log "DEV: ballot tally: $votes/$total [$vote_log]"
 
-    if [[ "$total" -ge 2 && "$votes" -ge 2 ]]; then
+    # Persist ballot results in metadata
+    kodo_pipeline_set "$EVENT_ID" "dev" "ballot_votes" "$votes"
+    kodo_pipeline_set "$EVENT_ID" "dev" "ballot_total" "$total"
+    kodo_pipeline_set "$EVENT_ID" "dev" "ballot_detail" "$vote_log"
+
+    if [[ "$total" -lt 2 ]]; then
+        defer "ballot: insufficient voters ($total < 2)"
+    elif [[ "$votes" -ge 2 ]]; then
+        kodo_log "DEV: consensus reached ($votes/$total) — guarded_merge"
         transition "balloting" "guarded_merge"
     else
         defer "ballot: no consensus ($votes/$total)"

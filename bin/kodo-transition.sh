@@ -110,12 +110,14 @@ apply_transition() {
 
     # Initial state creation (*→pending)
     if [[ "$from" == "*" && "$to" == "pending" ]]; then
-        kodo_sql "INSERT OR IGNORE INTO pipeline_state (event_id, repo, domain, state)
+        local payload="${KODO_TRANSITION_PAYLOAD:-\{\}}"
+        kodo_sql "INSERT OR IGNORE INTO pipeline_state (event_id, repo, domain, state, payload_json)
             VALUES (
                 '$(kodo_sql_escape "$event_id")',
                 '$(kodo_sql_escape "${KODO_TRANSITION_REPO:-unknown}")',
                 '$(kodo_sql_escape "$domain")',
-                'pending'
+                'pending',
+                '$(kodo_sql_escape "$payload")'
             );"
         kodo_log "STATE: $event_id [$domain] * → pending"
         return 0

@@ -31,6 +31,11 @@ get_state() {
         WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND domain = 'mkt';"
 }
 
+get_payload() {
+    kodo_sql "SELECT payload_json FROM pipeline_state
+        WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND domain = 'mkt';"
+}
+
 transition() {
     "$SCRIPT_DIR/kodo-transition.sh" "$EVENT_ID" "$1" "$2" "mkt"
 }
@@ -216,16 +221,25 @@ main() {
         pending)
             transition "pending" "drafting"
 
-            # Determine content type from event
-            local event_type
-            event_type=$(kodo_sql "SELECT event_type FROM pending_events
-                WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")';" 2>/dev/null)
-            # Also check payload stored in pipeline
-            if [[ -z "$event_type" ]]; then
-                event_type="PullRequestEvent"
-            fi
+            local payload
+            payload="$(get_payload)"
+            payload="${payload:-\{\}}"
 
-            local payload="{}"
+            # Determine content type from event_id pattern
+            local event_type="PullRequestEvent"
+            if [[ "$EVENT_ID" == *"ReleaseEvent"* ]]; then
+                event_type="ReleaseEvent"
+            elif [[ "$EVENT_ID" == *"IssuesEvent"* ]]; then
+                event_type="IssuesEvent"
+            elif [[ "$EVENT_ID" == *"IssueCommentEvent"* ]]; then
+                event_type="IssueCommentEvent"
+            elif [[ "$EVENT_ID" == *"ForkEvent"* ]]; then
+                event_type="ForkEvent"
+            elif [[ "$EVENT_ID" == *"WatchEvent"* ]]; then
+                event_type="WatchEvent"
+            elif [[ "$EVENT_ID" == *"DiscussionEvent"* ]]; then
+                event_type="DiscussionEvent"
+            fi
 
             case "$event_type" in
                 PullRequestEvent|IssueCommentEvent|IssuesEvent)

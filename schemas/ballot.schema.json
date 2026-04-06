@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "KODO Ballot Vote",
+  "description": "Structured vote from a CLI during ballot consensus",
+  "type": "object",
+  "required": ["vote", "score", "reason"],
+  "properties": {
+    "vote": {
+      "type": "string",
+      "enum": ["approve", "reject"],
+      "description": "approve = safe to merge, reject = not safe"
+    },
+    "score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Confidence score for merge safety"
+    },
+    "reason": {
+      "type": "string",
+      "description": "Brief explanation for the vote"
+    }
+  },
+  "additionalProperties": false
+}

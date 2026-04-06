@@ -133,8 +133,9 @@ dispatch_engine() {
         return 0
     fi
 
-    # Create pipeline state
+    # Create pipeline state (with payload for engines to read)
     export KODO_TRANSITION_REPO="$repo"
+    export KODO_TRANSITION_PAYLOAD="$payload"
     "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "*" "pending" "$domain" 2>&1 || true
 
     # Dispatch engine as background process
@@ -145,52 +146,81 @@ dispatch_engine() {
 # ── Main ─────────────────────────────────────────────────────
 
 main() {
-    # Process pending events in chronological order
+    local processed=0
+
+    # Phase 1: Process new pending events
     local events
     events=$(kodo_sql "SELECT event_id, repo, event_type, payload_json
         FROM pending_events ORDER BY detected_at ASC LIMIT 20;")
 
-    if [[ -z "$events" ]]; then
-        exit 0
-    fi
+    if [[ -n "$events" ]]; then
+        while IFS='|' read -r event_id repo event_type payload; do
+            [[ -z "$event_id" ]] && continue
 
-    local processed=0
-
-    while IFS='|' read -r event_id repo event_type payload; do
-        [[ -z "$event_id" ]] && continue
-
-        # Check repo is registered
-        if [[ ! -f "$KODO_HOME/repos/${repo}.toml" ]]; then
-            kodo_log "BRAIN: unregistered repo '$repo' — removing event $event_id"
-            kodo_sql "DELETE FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")';"
-            continue
-        fi
-
-        # Classify
-        local domains
-        domains="$(classify_event "$event_type" "$payload")"
-        kodo_log "BRAIN: $event_id ($event_type) on $repo → [$domains]"
-
-        # Dispatch to each domain
-        for domain in $domains; do
-            # Check if already in pipeline for this domain
-            local existing
-            existing=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
-                WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")'
-                AND state NOT IN ('resolved', 'closed');")
-            if [[ "$existing" -gt 0 ]]; then
+            # Check repo is registered
+            if [[ ! -f "$KODO_HOME/repos/${repo}.toml" ]]; then
+                kodo_log "BRAIN: unregistered repo '$repo' — removing event $event_id"
+                kodo_sql "DELETE FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")';"
                 continue
             fi
-            dispatch_engine "$domain" "$event_id" "$repo" "$payload"
-        done
 
-        # Remove from pending queue
-        kodo_sql "DELETE FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")';"
-        processed=$((processed + 1))
+            # Classify
+            local domains
+            domains="$(classify_event "$event_type" "$payload")"
+            kodo_log "BRAIN: $event_id ($event_type) on $repo → [$domains]"
 
-    done <<< "$events"
+            # Dispatch to each domain
+            for domain in $domains; do
+                # Check if already in pipeline for this domain
+                local existing
+                existing=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
+                    WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")'
+                    AND state NOT IN ('resolved', 'closed');")
+                if [[ "$existing" -gt 0 ]]; then
+                    continue
+                fi
+                dispatch_engine "$domain" "$event_id" "$repo" "$payload"
+            done
 
-    kodo_log "BRAIN: processed $processed events"
+            # Remove from pending queue
+            kodo_sql "DELETE FROM pending_events WHERE event_id = '$(kodo_sql_escape "$event_id")';"
+            processed=$((processed + 1))
+
+        done <<< "$events"
+    fi
+
+    # Phase 2: Advance events stuck in intermediate states
+    # Re-dispatch engines for events that need further processing
+    local stalled
+    stalled=$(kodo_sql "SELECT event_id, repo, domain, state FROM pipeline_state
+        WHERE state NOT IN ('pending', 'resolved', 'closed', 'published', 'reported', 'deferred')
+        AND updated_at < datetime('now', '-30 seconds')
+        ORDER BY updated_at ASC LIMIT 5;")
+
+    if [[ -n "$stalled" ]]; then
+        while IFS='|' read -r event_id repo domain state; do
+            [[ -z "$event_id" ]] && continue
+
+            local toml="$KODO_HOME/repos/${repo}.toml"
+            [[ ! -f "$toml" ]] && continue
+
+            local engine_script
+            case "$domain" in
+                dev) engine_script="$SCRIPT_DIR/kodo-dev.sh" ;;
+                mkt) engine_script="$SCRIPT_DIR/kodo-mkt.sh" ;;
+                pm)  engine_script="$SCRIPT_DIR/kodo-pm.sh" ;;
+                *)   continue ;;
+            esac
+
+            [[ ! -x "$engine_script" ]] && continue
+
+            kodo_log "BRAIN: advancing stalled $event_id [$domain] (state: $state)"
+            "$engine_script" "$event_id" "$toml" "$domain" >> "$KODO_LOG_DIR/${domain}.log" 2>&1 &
+
+        done <<< "$stalled"
+    fi
+
+    kodo_log "BRAIN: processed $processed new events"
 }
 
 main "$@"
