@@ -507,10 +507,334 @@ do_hard_gates() {
     if [[ "$deps_fast" == "true" ]]; then
         kodo_log "DEV: deps PR — hard gates passed, fast path to auto_merge"
         transition "hard_gates" "auto_merge"
+        return
+    fi
+
+    # KODO-generated PRs: wait for bot feedback before auditing (if enabled)
+    local kodo_pr_num
+    kodo_pr_num=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_number")
+    if [[ -n "$kodo_pr_num" && "$kodo_pr_num" != "null" ]]; then
+        local fb_enabled
+        fb_enabled=$(kodo_toml_bool "$REPO_TOML" "dev" "await_bot_feedback" && echo "true" || echo "false")
+        if [[ "$fb_enabled" == "true" ]]; then
+            local feedback_rounds
+            feedback_rounds=$(kodo_pipeline_get "$EVENT_ID" "dev" "feedback_rounds")
+            feedback_rounds="${feedback_rounds:-0}"
+            local max_rounds
+            max_rounds=$(kodo_toml_get "$REPO_TOML" "dev" "max_feedback_rounds")
+            max_rounds="${max_rounds:-2}"
+            if [[ "$feedback_rounds" -lt "$max_rounds" ]]; then
+                kodo_log "DEV: KODO PR — entering feedback wait (round $feedback_rounds/$max_rounds)"
+                transition "hard_gates" "awaiting_feedback"
+                return
+            fi
+            kodo_log "DEV: feedback rounds exhausted ($feedback_rounds/$max_rounds) — proceeding to audit"
+        fi
+    fi
+
+    transition "hard_gates" "auditing"
+}
+
+# ── PR Feedback Loop ─────────────────────────────────────────
+
+do_awaiting_feedback() {
+    kodo_log "DEV: awaiting feedback for $EVENT_ID"
+
+    local pr_num
+    pr_num=$(_get_pr_num)
+    if [[ -z "$pr_num" || "$pr_num" == "null" ]]; then
+        kodo_log "DEV: no PR number — skipping feedback wait"
+        transition "awaiting_feedback" "auditing"
+        return
+    fi
+
+    # Mark when we started waiting (first entry only)
+    local wait_started
+    wait_started=$(kodo_pipeline_get "$EVENT_ID" "dev" "feedback_wait_started")
+    if [[ -z "$wait_started" || "$wait_started" == "null" ]]; then
+        kodo_pipeline_set "$EVENT_ID" "dev" "feedback_wait_started" "$(date +%s)"
+        kodo_log "DEV: feedback window opened — yielding to brain for re-dispatch"
+        return
+    fi
+
+    # Check if window expired
+    local now
+    now=$(date +%s)
+    local window_minutes
+    window_minutes=$(kodo_toml_get "$REPO_TOML" "dev" "feedback_window_minutes")
+    window_minutes="${window_minutes:-10}"
+    local window_seconds=$(( window_minutes * 60 ))
+    local elapsed=$(( now - wait_started ))
+
+    # Fetch reviews and inline comments from GitHub
+    local reviews
+    reviews=$("$SCRIPT_DIR/kodo-git.sh" pr-reviews "$REPO_TOML" "$pr_num" 2>/dev/null) || reviews="[]"
+    local review_comments
+    review_comments=$("$SCRIPT_DIR/kodo-git.sh" pr-review-comments "$REPO_TOML" "$pr_num" 2>/dev/null) || review_comments="[]"
+
+    # Count items not yet in pr_feedback table
+    local new_review_count=0
+    local has_changes_requested=false
+
+    # Process top-level reviews
+    local review_ids
+    review_ids=$(echo "$reviews" | jq -r '.[].id' 2>/dev/null) || review_ids=""
+    for rid in $review_ids; do
+        local existing
+        existing=$(kodo_sql "SELECT COUNT(*) FROM pr_feedback WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND review_id = 'review-$(kodo_sql_escape "$rid")';")
+        if [[ "${existing:-0}" -eq 0 ]]; then
+            new_review_count=$((new_review_count + 1))
+            local review_state
+            review_state=$(echo "$reviews" | jq -r ".[] | select(.id == \"$rid\") | .state" 2>/dev/null)
+            if [[ "$review_state" == "CHANGES_REQUESTED" ]]; then
+                has_changes_requested=true
+            fi
+        fi
+    done
+
+    # Process inline comments
+    local comment_ids
+    comment_ids=$(echo "$review_comments" | jq -r '.[].id' 2>/dev/null) || comment_ids=""
+    for cid in $comment_ids; do
+        local existing
+        existing=$(kodo_sql "SELECT COUNT(*) FROM pr_feedback WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND review_id = 'comment-$(kodo_sql_escape "$cid")';")
+        if [[ "${existing:-0}" -eq 0 ]]; then
+            new_review_count=$((new_review_count + 1))
+        fi
+    done
+
+    # No new feedback and window still open — yield
+    if [[ "$new_review_count" -eq 0 && "$elapsed" -lt "$window_seconds" ]]; then
+        kodo_log "DEV: no new feedback yet, window ${elapsed}s/${window_seconds}s — yielding"
+        return
+    fi
+
+    # Window expired with no feedback — proceed to auditing
+    if [[ "$new_review_count" -eq 0 ]]; then
+        kodo_log "DEV: feedback window expired ($window_minutes min), no reviews — proceeding to audit"
+        transition "awaiting_feedback" "auditing"
+        return
+    fi
+
+    # Changes requested = immediate defer
+    if [[ "$has_changes_requested" == "true" ]]; then
+        kodo_log "DEV: CHANGES_REQUESTED review found — deferring"
+        defer "PR has changes_requested review"
+        return
+    fi
+
+    kodo_log "DEV: $new_review_count new feedback items found — classifying"
+
+    # Build feedback text for classification
+    local feedback_text=""
+    feedback_text+="Reviews: $(echo "$reviews" | jq -c '[.[] | {author, state, body}]' 2>/dev/null)"
+    feedback_text+=" Comments: $(echo "$review_comments" | jq -c '[.[] | {author, body, path, line}]' 2>/dev/null)"
+
+    # Classify with Qwen (free) or Gemini (free)
+    local classify_cli=""
+    for cli in qwen gemini; do
+        if kodo_cli_available "$cli"; then
+            classify_cli="$cli"
+            break
+        fi
+    done
+
+    local classification=""
+    if [[ -n "$classify_cli" ]]; then
+        local classify_prompt
+        classify_prompt="$(kodo_prompt "Classify this PR feedback. Determine if there are blocking concerns, concrete code suggestions, or approval signals.
+
+Feedback:
+$feedback_text")"
+
+        classification=$(kodo_invoke_llm "$classify_cli" "$classify_prompt" \
+            --schema "$KODO_HOME/schemas/feedback.schema.json" \
+            --timeout 60 \
+            --repo "$REPO_ID" \
+            --domain "dev") || classification=""
+    fi
+
+    # Store each review in pr_feedback table
+    for rid in $review_ids; do
+        local existing
+        existing=$(kodo_sql "SELECT COUNT(*) FROM pr_feedback WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND review_id = 'review-$(kodo_sql_escape "$rid")';")
+        [[ "${existing:-0}" -gt 0 ]] && continue
+        local author author_type body state
+        author=$(echo "$reviews" | jq -r ".[] | select(.id == \"$rid\") | .author" 2>/dev/null)
+        author_type=$(echo "$reviews" | jq -r ".[] | select(.id == \"$rid\") | .author_type" 2>/dev/null)
+        state=$(echo "$reviews" | jq -r ".[] | select(.id == \"$rid\") | .state" 2>/dev/null)
+        body=$(echo "$reviews" | jq -r ".[] | select(.id == \"$rid\") | .body" 2>/dev/null)
+        local is_bot=0
+        [[ "$author_type" == "Bot" ]] && is_bot=1
+        local cls="informational"
+        [[ "$state" == "APPROVED" ]] && cls="approval"
+        [[ "$state" == "CHANGES_REQUESTED" ]] && cls="changes_requested"
+        kodo_sql "INSERT OR IGNORE INTO pr_feedback (event_id, repo, review_id, review_type, author, author_is_bot, classification, raw_body)
+            VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', 'review-$(kodo_sql_escape "$rid")', 'review',
+            '$(kodo_sql_escape "$author")', $is_bot, '$(kodo_sql_escape "$cls")', '$(kodo_sql_escape "${body:0:2000}")');"
+    done
+
+    # Store inline comments
+    local has_suggestions=false
+    for cid in $comment_ids; do
+        local existing
+        existing=$(kodo_sql "SELECT COUNT(*) FROM pr_feedback WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND review_id = 'comment-$(kodo_sql_escape "$cid")';")
+        [[ "${existing:-0}" -gt 0 ]] && continue
+        local author author_type body fpath fline
+        author=$(echo "$review_comments" | jq -r ".[] | select(.id == \"$cid\") | .author" 2>/dev/null)
+        author_type=$(echo "$review_comments" | jq -r ".[] | select(.id == \"$cid\") | .author_type" 2>/dev/null)
+        body=$(echo "$review_comments" | jq -r ".[] | select(.id == \"$cid\") | .body" 2>/dev/null)
+        fpath=$(echo "$review_comments" | jq -r ".[] | select(.id == \"$cid\") | .path" 2>/dev/null)
+        fline=$(echo "$review_comments" | jq -r ".[] | select(.id == \"$cid\") | .line" 2>/dev/null)
+        local is_bot=0
+        [[ "$author_type" == "Bot" ]] && is_bot=1
+        local cls="concern"
+        if echo "$body" | grep -q '```suggestion'; then
+            cls="suggestion"
+            has_suggestions=true
+        fi
+        kodo_sql "INSERT OR IGNORE INTO pr_feedback (event_id, repo, review_id, review_type, author, author_is_bot, classification, raw_body, file_path, line_number)
+            VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', 'comment-$(kodo_sql_escape "$cid")', 'comment',
+            '$(kodo_sql_escape "$author")', $is_bot, '$(kodo_sql_escape "$cls")', '$(kodo_sql_escape "${body:0:2000}")',
+            '$(kodo_sql_escape "$fpath")', ${fline:-0});"
+    done
+
+    # Apply confidence delta from classification
+    local delta=0
+    if [[ -n "$classification" ]]; then
+        delta=$(echo "$classification" | jq -r '.confidence_delta // 0' 2>/dev/null)
+        [[ ! "$delta" =~ ^-?[0-9]+$ ]] && delta=0
+        if [[ "$delta" -ne 0 ]]; then
+            kodo_pipeline_set "$EVENT_ID" "dev" "feedback_confidence_delta" "$delta"
+            kodo_log "DEV: feedback confidence delta: $delta"
+        fi
+        local blocking
+        blocking=$(echo "$classification" | jq -r '.has_blocking_concerns // false' 2>/dev/null)
+        if [[ "$blocking" == "true" ]]; then
+            kodo_log "DEV: blocking concerns detected — deferring"
+            defer "PR feedback contains blocking concerns"
+            return
+        fi
+    fi
+
+    # Should we apply suggestions?
+    local apply_enabled
+    apply_enabled=$(kodo_toml_bool "$REPO_TOML" "dev" "apply_bot_suggestions" && echo "true" || echo "false")
+    if [[ "$has_suggestions" == "true" && "$apply_enabled" == "true" ]]; then
+        # Check if suggestions are from trusted bots
+        local trusted_bots
+        trusted_bots=$(kodo_toml_get "$REPO_TOML" "dev" "trusted_review_bots")
+        local has_trusted_suggestion=false
+        local suggestion_authors
+        suggestion_authors=$(kodo_sql "SELECT DISTINCT author FROM pr_feedback
+            WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND classification = 'suggestion'
+            AND author_is_bot = 1 AND suggestion_applied = 0;")
+        for sa in $suggestion_authors; do
+            if echo "$trusted_bots" | grep -q "$sa"; then
+                has_trusted_suggestion=true
+                break
+            fi
+        done
+
+        if [[ "$has_trusted_suggestion" == "true" ]]; then
+            kodo_log "DEV: trusted bot suggestions found — applying"
+            transition "awaiting_feedback" "applying_suggestions"
+            return
+        fi
+    fi
+
+    kodo_log "DEV: feedback processed (delta=$delta) — proceeding to audit"
+    transition "awaiting_feedback" "auditing"
+}
+
+do_applying_suggestions() {
+    kodo_log "DEV: applying bot suggestions for $EVENT_ID"
+
+    local pr_num
+    pr_num=$(_get_pr_num)
+    if [[ -z "$pr_num" || "$pr_num" == "null" ]]; then
+        kodo_log "DEV: no PR number — skipping suggestion apply"
+        transition "applying_suggestions" "auditing"
+        return
+    fi
+
+    # Get the PR branch name from metadata or payload
+    local pr_branch
+    pr_branch=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_branch")
+    if [[ -z "$pr_branch" || "$pr_branch" == "null" ]]; then
+        pr_branch=$(get_payload | jq -r '.headRefName // empty' 2>/dev/null)
+    fi
+    if [[ -z "$pr_branch" ]]; then
+        pr_branch="kodo/dev/$EVENT_ID"
+    fi
+
+    # Clone and checkout the PR branch
+    local work_dir
+    work_dir=$("$SCRIPT_DIR/kodo-git.sh" repo-clone "$REPO_TOML" "$pr_branch" 2>/dev/null) || {
+        kodo_log "DEV: failed to clone repo for suggestion apply"
+        transition "applying_suggestions" "auditing"
+        return
+    }
+    _KODO_WORKDIR_CLEANUP="$work_dir"
+
+    # Get unprocessed suggestions from trusted bots
+    local suggestions
+    suggestions=$(kodo_sql "SELECT review_id, raw_body, file_path, line_number FROM pr_feedback
+        WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND classification = 'suggestion'
+        AND author_is_bot = 1 AND suggestion_applied = 0
+        ORDER BY line_number ASC;")
+
+    local applied_count=0
+    while IFS='|' read -r review_id raw_body file_path line_number; do
+        [[ -z "$review_id" ]] && continue
+
+        # Extract suggestion content from ```suggestion ... ``` block
+        local suggestion_text
+        suggestion_text=$(echo "$raw_body" | sed -n '/^```suggestion/,/^```$/{//!p;}')
+        if [[ -z "$suggestion_text" ]]; then
+            kodo_log "DEV: no suggestion block found in $review_id — skipping"
+            continue
+        fi
+
+        kodo_log "DEV: applying suggestion $review_id to $file_path:$line_number"
+        if "$SCRIPT_DIR/kodo-git.sh" pr-apply-suggestion "$REPO_TOML" "$work_dir" "$file_path" "$line_number" "$suggestion_text" \
+            "kodo(dev): apply bot suggestion -- $EVENT_ID" 2>/dev/null; then
+            applied_count=$((applied_count + 1))
+            kodo_sql "UPDATE pr_feedback SET suggestion_applied = 1
+                WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND review_id = '$(kodo_sql_escape "$review_id")';"
+        else
+            kodo_log "DEV: suggestion $review_id failed to apply (context mismatch?) — skipping"
+        fi
+    done <<< "$suggestions"
+
+    if [[ "$applied_count" -gt 0 ]]; then
+        kodo_log "DEV: $applied_count suggestions applied — pushing updates"
+        "$SCRIPT_DIR/kodo-git.sh" branch-push "$REPO_TOML" "$work_dir" "$pr_branch" 2>/dev/null || {
+            kodo_log "DEV: push failed after applying suggestions (shadow mode?)"
+        }
+
+        # Increment feedback rounds
+        local rounds
+        rounds=$(kodo_pipeline_get "$EVENT_ID" "dev" "feedback_rounds")
+        rounds="${rounds:-0}"
+        rounds=$((rounds + 1))
+        kodo_pipeline_set "$EVENT_ID" "dev" "feedback_rounds" "$rounds"
+        # Clear wait timestamp so next round starts fresh
+        kodo_pipeline_set "$EVENT_ID" "dev" "feedback_wait_started" ""
+
+        kodo_log "DEV: feedback round $rounds complete — re-entering hard_gates"
+        "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
+        _KODO_WORKDIR_CLEANUP=""
+        transition "applying_suggestions" "hard_gates"
     else
-        transition "hard_gates" "auditing"
+        kodo_log "DEV: no suggestions could be applied — proceeding to audit"
+        "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
+        _KODO_WORKDIR_CLEANUP=""
+        transition "applying_suggestions" "auditing"
     fi
 }
+
+# ── Auditing & Scanning ─────────────────────────────────────
 
 do_auditing() {
     kodo_log "DEV: auditing $EVENT_ID"
@@ -575,6 +899,17 @@ Score confidence 0-100 for merge safety. Identify risks and behavioral changes."
     else
         defer "no review CLI available"
         return
+    fi
+
+    # Apply accumulated feedback confidence delta (from bot reviews)
+    local feedback_delta
+    feedback_delta=$(kodo_pipeline_get "$EVENT_ID" "dev" "feedback_confidence_delta")
+    feedback_delta="${feedback_delta:-0}"
+    if [[ "$feedback_delta" != "0" && "$feedback_delta" != "null" ]]; then
+        kodo_log "DEV: applying feedback confidence delta: $feedback_delta"
+        confidence=$(( confidence + feedback_delta ))
+        [[ "$confidence" -lt 0 ]] && confidence=0
+        [[ "$confidence" -gt 100 ]] && confidence=100
     fi
 
     kodo_log "DEV: confidence=$confidence model=$review_model for $EVENT_ID"
@@ -949,7 +1284,7 @@ do_reverting() {
 # Loops through states until a terminal state or a blocking operation.
 # One invocation drives the event as far as it can go — no re-dispatch needed.
 
-readonly MAX_STEPS=12
+readonly MAX_STEPS=16
 
 main() {
     local state
@@ -972,6 +1307,8 @@ main() {
             triaging)        do_triaging ;;
             generating)      do_generating ;;
             hard_gates)      do_hard_gates ;;
+            awaiting_feedback) do_awaiting_feedback ;;
+            applying_suggestions) do_applying_suggestions ;;
             auditing)        do_auditing ;;
             scanning)        do_scanning ;;
             balloting)       do_balloting ;;

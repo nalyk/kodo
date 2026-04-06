@@ -93,6 +93,24 @@ INSERT OR IGNORE INTO confidence_bands (band, threshold) VALUES
     ('ballot', 50),
     ('defer', 0);
 
+CREATE TABLE IF NOT EXISTS pr_feedback (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id          TEXT NOT NULL,
+    repo              TEXT NOT NULL,
+    review_id         TEXT NOT NULL,
+    review_type       TEXT NOT NULL CHECK (review_type IN ('review', 'comment')),
+    author            TEXT NOT NULL,
+    author_is_bot     INTEGER NOT NULL DEFAULT 0,
+    classification    TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (classification IN ('suggestion', 'concern', 'approval', 'changes_requested', 'informational', 'pending')),
+    suggestion_applied INTEGER NOT NULL DEFAULT 0,
+    raw_body          TEXT NOT NULL DEFAULT '',
+    file_path         TEXT NOT NULL DEFAULT '',
+    line_number       INTEGER NOT NULL DEFAULT 0,
+    processed_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (event_id, review_id)
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_pending_repo ON pending_events(repo);
 CREATE INDEX IF NOT EXISTS idx_pipeline_repo ON pipeline_state(repo, domain);
@@ -101,3 +119,4 @@ CREATE INDEX IF NOT EXISTS idx_budget_model_month ON budget_ledger(model, invoke
 CREATE INDEX IF NOT EXISTS idx_budget_repo ON budget_ledger(repo);
 CREATE INDEX IF NOT EXISTS idx_merge_repo ON merge_outcomes(repo, merged_at);
 CREATE INDEX IF NOT EXISTS idx_deferred_domain ON deferred_queue(domain);
+CREATE INDEX IF NOT EXISTS idx_pr_feedback_event ON pr_feedback(event_id);

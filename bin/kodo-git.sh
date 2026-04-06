@@ -250,6 +250,46 @@ _gh_issue_get() {
     }'
 }
 
+# ── PR Feedback ──────────────────────────────────────────────
+
+# Fetch all reviews on a PR (approval, changes_requested, commented)
+_gh_pr_reviews() {
+    local slug="$1" pr_num="$2"
+    gh api "repos/${slug}/pulls/${pr_num}/reviews" --jq \
+        '[.[] | {id: (.id | tostring), author: .user.login, author_type: .user.type, state: .state, body: .body, submitted_at: .submitted_at}]' \
+        2>/dev/null || echo "[]"
+}
+
+# Fetch inline review comments (contains suggestion blocks)
+_gh_pr_review_comments() {
+    local slug="$1" pr_num="$2"
+    gh api "repos/${slug}/pulls/${pr_num}/comments" --jq \
+        '[.[] | {id: (.id | tostring), author: .user.login, author_type: .user.type, body: .body, path: .path, line: (.line // .original_line // 0), created_at: .created_at}]' \
+        2>/dev/null || echo "[]"
+}
+
+# Apply a suggestion patch in a working directory and commit
+# Usage: _gh_pr_apply_suggestion <work_dir> <file_path> <line_num> <suggestion_text> <commit_msg>
+_gh_pr_apply_suggestion() {
+    local work_dir="$1" file_path="$2" line_num="$3" suggestion_text="$4" commit_msg="$5"
+    (
+        cd "$work_dir" || return 1
+        if [[ ! -f "$file_path" ]]; then
+            return 1
+        fi
+        # Replace the target line(s) with the suggestion text
+        # GitHub suggestions replace the line at the given position
+        local tmp_file
+        tmp_file=$(mktemp)
+        awk -v line="$line_num" -v replacement="$suggestion_text" '
+            NR == line { print replacement; next }
+            { print }
+        ' "$file_path" > "$tmp_file" && mv "$tmp_file" "$file_path"
+        git add "$file_path"
+        git commit -m "$commit_msg" --no-verify
+    )
+}
+
 # ── Gitea / Bitbucket stubs ──────────────────────────────────
 
 _stub_not_supported() {
@@ -298,7 +338,7 @@ main() {
     shift 2
 
     # Write actions require shadow mode check
-    local write_actions="pr-comment pr-merge pr-create branch-push issue-comment issue-close issue-label issue-create release-edit discussion-create"
+    local write_actions="pr-comment pr-merge pr-create branch-push issue-comment issue-close issue-label issue-create release-edit discussion-create pr-apply-suggestion"
     if [[ " $write_actions " == *" $action "* ]]; then
         _guard_write "$toml" "$action" || return $?
     fi
@@ -328,6 +368,9 @@ main() {
                 pr-create)          _gh_pr_create "$slug" "$@" ;;
                 issue-get)          _gh_issue_get "$slug" "$@" ;;
                 branch-push)        _gh_branch_push "$@" ;;
+                pr-reviews)         _gh_pr_reviews "$slug" "$@" ;;
+                pr-review-comments) _gh_pr_review_comments "$slug" "$@" ;;
+                pr-apply-suggestion) _gh_pr_apply_suggestion "$@" ;;
                 *) kodo_log "ERROR: unknown action '$action'"; exit 1 ;;
             esac
             ;;

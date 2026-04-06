@@ -16,6 +16,11 @@ lint_command = "npm run lint"           # Command to run linter
 max_diff_lines = 500                    # Hard gate: max diff size
 auto_merge_deps = true                  # Auto-merge dependency updates if CI green
 semver_release = true                   # Auto-tag semver releases after merge
+await_bot_feedback = true               # Wait for bot reviews before auditing KODO-generated PRs
+feedback_window_minutes = 10            # How long to wait for bot reviews (minutes)
+max_feedback_rounds = 2                 # Max suggestion-apply cycles before proceeding to audit
+apply_bot_suggestions = true            # Auto-apply code suggestions from trusted bots
+trusted_review_bots = ["gemini-code-assist[bot]", "coderabbit[bot]"]
 
 [mkt]
 enabled = true                          # Enable marketing engine
