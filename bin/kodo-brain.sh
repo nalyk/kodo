@@ -238,7 +238,7 @@ main() {
     stalled=$(kodo_sql "SELECT event_id, repo, domain, state FROM pipeline_state
         WHERE state NOT IN ('resolved', 'closed', 'published', 'reported', 'deferred')
         AND (processing_pid IS NULL OR processing_pid = 0)
-        AND updated_at < datetime('now', '-5 seconds')
+        AND updated_at < datetime('now', '-300 seconds')
         ORDER BY updated_at ASC LIMIT 15;")
 
     if [[ -n "$stalled" ]]; then
@@ -264,7 +264,20 @@ main() {
                 break
             fi
 
-            kodo_log "BRAIN: advancing stalled $event_id [$domain] (state: $state)"
+            # Max re-dispatch guard: defer after 10 failed re-dispatches
+            local redispatch_count
+            redispatch_count=$(kodo_sql "SELECT COALESCE(json_extract(metadata_json, '\$.redispatch_count'), 0)
+                FROM pipeline_state WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")';")
+            redispatch_count="${redispatch_count:-0}"
+            if [[ "$redispatch_count" -ge 10 ]]; then
+                kodo_log "BRAIN: $event_id [$domain] stuck after $redispatch_count re-dispatches — deferring"
+                "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "$state" "deferred" "$domain" 2>/dev/null || true
+                continue
+            fi
+
+            kodo_log "BRAIN: advancing stalled $event_id [$domain] (state: $state, redispatch: $redispatch_count)"
+            kodo_sql "UPDATE pipeline_state SET metadata_json = json_set(COALESCE(metadata_json, '{}'), '\$.redispatch_count', $((redispatch_count + 1)))
+                WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")';"
             "$engine_script" "$event_id" "$toml" "$domain" >> "$KODO_LOG_DIR/${domain}.log" 2>&1 &
             active_count=$((active_count + 1))
 

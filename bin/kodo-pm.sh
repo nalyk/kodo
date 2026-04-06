@@ -223,7 +223,7 @@ do_event() {
             local payload
             payload=$(kodo_sql "SELECT payload_json FROM pipeline_state
                 WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = 'pm';")
-            payload="${payload:-{}}"
+            [[ -z "$payload" ]] && payload='{}'
 
             local event_title event_detail
             event_title=$(echo "$payload" | jq -r '.title // .description // "untitled"' 2>/dev/null)
