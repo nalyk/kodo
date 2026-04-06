@@ -65,7 +65,7 @@ if kodo_cli_available claude; then
     issue_data=$("$SCRIPT_DIR/kodo-git.sh" issue-list "$local_tmp" 2>/dev/null) || issue_data="[]"
 
     local repo_api_data
-    repo_api_data=$(gh api "repos/$OWNER/$REPO" 2>/dev/null) || repo_api_data="{}"
+    repo_api_data=$("$SCRIPT_DIR/kodo-git.sh" repo-info "$local_tmp" 2>/dev/null) || repo_api_data="{}"
 
     local prompt="Analyze this repository: $OWNER/$REPO
 
@@ -76,11 +76,11 @@ Open issues count: $(echo "$issue_data" | jq 'length' 2>/dev/null || echo "0")
 Discover: language, CI system, test command, lint command, default branch, labels, conventions."
 
     local discovery
-    discovery=$(timeout 120 claude -p "$prompt" \
-        --json-schema "$KODO_HOME/schemas/discovery.schema.json" \
-        --max-turns 3 2>/dev/null) || discovery=""
-
-    kodo_log_budget "claude" "$REPO_ID" "onboard" 0 0 1.00
+    discovery=$(kodo_invoke_llm claude "$prompt" \
+        --schema "$KODO_HOME/schemas/discovery.schema.json" \
+        --timeout 120 \
+        --repo "$OWNER/$REPO" \
+        --domain "onboard") || discovery=""
 
     if [[ -n "$discovery" ]]; then
         # Extract discovered values
@@ -98,9 +98,9 @@ Discover: language, CI system, test command, lint command, default branch, label
 else
     echo "Claude unavailable — using basic discovery..."
 
-    # Basic discovery via GitHub API
+    # Basic discovery via kodo-git.sh
     local repo_info
-    repo_info=$(gh api "repos/$OWNER/$REPO" 2>/dev/null) || repo_info="{}"
+    repo_info=$("$SCRIPT_DIR/kodo-git.sh" repo-info "$local_tmp" 2>/dev/null) || repo_info="{}"
 
     local lang branch
     lang=$(echo "$repo_info" | jq -r '.language // "unknown"' 2>/dev/null)

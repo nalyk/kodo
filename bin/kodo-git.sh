@@ -298,7 +298,7 @@ main() {
     shift 2
 
     # Write actions require shadow mode check
-    local write_actions="pr-comment pr-merge pr-create branch-push issue-comment issue-close issue-label release-edit discussion-create"
+    local write_actions="pr-comment pr-merge pr-create branch-push issue-comment issue-close issue-label issue-create release-edit discussion-create"
     if [[ " $write_actions " == *" $action "* ]]; then
         _guard_write "$toml" "$action" || return $?
     fi
@@ -322,6 +322,8 @@ main() {
                 discussion-create)  _gh_discussion_create "$slug" "$@" ;;
                 milestone-list)     _gh_milestone_list "$slug" ;;
                 compare)            _gh_compare "$slug" "$@" ;;
+                repo-info)          gh api "repos/$slug" 2>/dev/null || echo "{}" ;;
+                issue-create)       gh issue create --repo "$slug" --title "$1" --body "$2" 2>/dev/null ;;
                 repo-clone)         _gh_repo_clone "$slug" "$@" ;;
                 pr-create)          _gh_pr_create "$slug" "$@" ;;
                 issue-get)          _gh_issue_get "$slug" "$@" ;;

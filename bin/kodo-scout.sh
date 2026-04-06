@@ -140,8 +140,8 @@ main() {
         repo_id="$(kodo_repo_id "$toml")"
         toml_count=$((toml_count + 1))
 
-        # Skip disabled repos
-        if ! kodo_toml_bool "$toml" "enabled" 2>/dev/null; then
+        # Skip disabled repos (check [repo].enabled, not [dev].enabled)
+        if ! kodo_toml_bool "$toml" "repo" "enabled" 2>/dev/null; then
             kodo_log "SCOUT: $repo_id disabled — skipping"
             continue
         fi

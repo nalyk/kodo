@@ -128,13 +128,14 @@ _triage_pr() {
     author_login=$(echo "$payload" | jq -r '.author.login // ""' 2>/dev/null | tr '[:upper:]' '[:lower:]')
 
     # Deps auto-merge fast path (zero LLM)
-    if kodo_toml_bool "$REPO_TOML" "auto_merge_deps"; then
+    if kodo_toml_bool "$REPO_TOML" "dev" "auto_merge_deps"; then
         if [[ "$title" == *"dependabot"* || "$title" == *"renovate"* || \
               "$title" == *"bump "* || "$title" == *"chore(deps)"* || \
               "$labels" == *"dependencies"* || \
               "$author_login" == *"dependabot"* || "$author_login" == *"renovate"* ]]; then
-            kodo_log "DEV: deps PR #$pr_num ($author_login) — auto_merge path"
-            transition "triaging" "auto_merge"
+            kodo_log "DEV: deps PR #$pr_num ($author_login) — hard_gates then auto_merge"
+            kodo_pipeline_set "$EVENT_ID" "dev" "deps_fast_path" "true"
+            transition "triaging" "hard_gates"
             return
         fi
     fi
@@ -173,11 +174,12 @@ do_generating() {
     kodo_log "DEV: generating code fix for $EVENT_ID"
 
     # Determine which CLI to use for code generation
+    # Prefer Codex ($20/mo budget) over Claude ($200/mo) — Claude is reserved for review/strategy
     local gen_cli=""
-    if kodo_cli_available claude; then
-        gen_cli="claude"
-    elif kodo_cli_available codex; then
+    if kodo_cli_available codex; then
         gen_cli="codex"
+    elif kodo_cli_available claude && kodo_check_budget "claude"; then
+        gen_cli="claude"
     else
         defer "no code generation CLI available (need claude or codex)"
         return
@@ -442,9 +444,9 @@ do_hard_gates() {
     kodo_log "DEV: running hard gates for $EVENT_ID"
 
     local test_cmd lint_cmd max_diff
-    test_cmd="$(kodo_toml_get "$REPO_TOML" "test_command")"
-    lint_cmd="$(kodo_toml_get "$REPO_TOML" "lint_command")"
-    max_diff="$(kodo_toml_get "$REPO_TOML" "max_diff_lines")"
+    test_cmd="$(kodo_toml_get "$REPO_TOML" "dev" "test_command")"
+    lint_cmd="$(kodo_toml_get "$REPO_TOML" "dev" "lint_command")"
+    max_diff="$(kodo_toml_get "$REPO_TOML" "dev" "max_diff_lines")"
     max_diff="${max_diff:-500}"
 
     local pr_num
@@ -461,9 +463,33 @@ do_hard_gates() {
         fi
     fi
 
-    # Gate 2: Test suite (if we have a cloned repo to test against)
-    # In practice, this runs in CI — we check CI status instead
-    # For now, we pass if no explicit failure signal
+    # Gate 2: Test suite (if configured and PR branch can be checked out)
+    if [[ -z "$gate_failed" && -n "$test_cmd" && -n "$pr_num" ]]; then
+        local work_dir=""
+        work_dir=$("$SCRIPT_DIR/kodo-git.sh" repo-clone "$REPO_TOML" "" 2>/dev/null) || work_dir=""
+        if [[ -n "$work_dir" && -d "$work_dir" ]]; then
+            # Fetch and checkout PR branch
+            local pr_branch
+            pr_branch=$(echo "$(get_payload)" | jq -r '.headRefName // empty' 2>/dev/null)
+            if [[ -n "$pr_branch" ]]; then
+                (cd "$work_dir" && git fetch origin "$pr_branch" && git checkout "$pr_branch") 2>/dev/null || pr_branch=""
+            fi
+            if [[ -n "$pr_branch" ]]; then
+                kodo_log "DEV: running test command: $test_cmd"
+                if ! (cd "$work_dir" && timeout 300 bash -c "$test_cmd") >/dev/null 2>&1; then
+                    gate_failed="test suite failed: $test_cmd"
+                fi
+                # Gate 3: Lint (if configured)
+                if [[ -z "$gate_failed" && -n "$lint_cmd" ]]; then
+                    kodo_log "DEV: running lint command: $lint_cmd"
+                    if ! (cd "$work_dir" && timeout 120 bash -c "$lint_cmd") >/dev/null 2>&1; then
+                        gate_failed="lint failed: $lint_cmd"
+                    fi
+                fi
+            fi
+            "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
+        fi
+    fi
 
     if [[ -n "$gate_failed" ]]; then
         kodo_log "DEV: hard gate failed — $gate_failed"
@@ -472,7 +498,15 @@ do_hard_gates() {
     fi
 
     kodo_log "DEV: all hard gates passed"
-    transition "hard_gates" "auditing"
+    # Deps fast path: skip auditing/scanning, go straight to auto_merge (CI still checked)
+    local deps_fast
+    deps_fast=$(kodo_pipeline_get "$EVENT_ID" "dev" "deps_fast_path")
+    if [[ "$deps_fast" == "true" ]]; then
+        kodo_log "DEV: deps PR — hard gates passed, fast path to auto_merge"
+        transition "hard_gates" "auto_merge"
+    else
+        transition "hard_gates" "auditing"
+    fi
 }
 
 do_auditing() {
@@ -599,28 +633,40 @@ do_scanning() {
     local scan_findings=0
 
     if command -v semgrep >/dev/null 2>&1; then
-        local payload pr_num
-        payload="$(get_payload)"
-        pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+        local pr_num
+        pr_num=$(_get_pr_num)
 
-        if [[ -n "$pr_num" && "$EVENT_ID" == *"PullRequestEvent"* ]]; then
-            local diff_files
-            diff_files=$("$SCRIPT_DIR/kodo-git.sh" pr-diff "$REPO_TOML" "$pr_num" 2>/dev/null \
-                | grep '^+++ b/' | sed 's|^+++ b/||' | head -20) || diff_files=""
-
-            if [[ -n "$diff_files" ]]; then
-                kodo_log "DEV: running semgrep on changed files"
-                scan_findings=$(echo "$diff_files" | xargs semgrep --config=auto --json 2>/dev/null \
-                    | jq '.results | length' 2>/dev/null) || scan_findings="0"
-
-                if [[ "$scan_findings" -gt 0 ]]; then
-                    scan_clean=false
-                    kodo_log "DEV: semgrep found $scan_findings issues"
-                    # Reduce confidence proportionally
-                    local penalty=$((scan_findings * 10))
-                    confidence=$((confidence > penalty ? confidence - penalty : 0))
-                    kodo_pipeline_set "$EVENT_ID" "dev" "scan_findings" "$scan_findings"
+        if [[ -n "$pr_num" ]]; then
+            # Clone and checkout the PR branch so semgrep scans actual code
+            local scan_dir=""
+            scan_dir=$("$SCRIPT_DIR/kodo-git.sh" repo-clone "$REPO_TOML" "" 2>/dev/null) || scan_dir=""
+            if [[ -n "$scan_dir" && -d "$scan_dir" ]]; then
+                local pr_branch
+                pr_branch=$(echo "$(get_payload)" | jq -r '.headRefName // empty' 2>/dev/null)
+                if [[ -n "$pr_branch" ]]; then
+                    (cd "$scan_dir" && git fetch origin "$pr_branch" && git checkout "$pr_branch") 2>/dev/null || pr_branch=""
                 fi
+                if [[ -n "$pr_branch" ]]; then
+                    # Get changed filenames from diff
+                    local diff_files
+                    diff_files=$("$SCRIPT_DIR/kodo-git.sh" pr-diff "$REPO_TOML" "$pr_num" 2>/dev/null \
+                        | grep '^+++ b/' | sed 's|^+++ b/||' | head -20) || diff_files=""
+
+                    if [[ -n "$diff_files" ]]; then
+                        kodo_log "DEV: running semgrep on changed files in checked-out branch"
+                        scan_findings=$(cd "$scan_dir" && echo "$diff_files" | xargs semgrep --config=auto --json 2>/dev/null \
+                            | jq '.results | length' 2>/dev/null) || scan_findings=0
+
+                        if [[ "$scan_findings" -gt 0 ]]; then
+                            scan_clean=false
+                            kodo_log "DEV: semgrep found $scan_findings issues"
+                            local penalty=$((scan_findings * 10))
+                            confidence=$((confidence > penalty ? confidence - penalty : 0))
+                            kodo_pipeline_set "$EVENT_ID" "dev" "scan_findings" "$scan_findings"
+                        fi
+                    fi
+                fi
+                "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$scan_dir" 2>/dev/null
             fi
         fi
     fi
@@ -879,7 +925,7 @@ do_guarded_merge() {
 do_releasing() {
     kodo_log "DEV: releasing $EVENT_ID"
 
-    if kodo_toml_bool "$REPO_TOML" "semver_release"; then
+    if kodo_toml_bool "$REPO_TOML" "dev" "semver_release"; then
         # Auto-tag semver release
         kodo_log "DEV: semver release enabled — would tag here"
         # In practice: determine next semver, create tag via kodo-git.sh

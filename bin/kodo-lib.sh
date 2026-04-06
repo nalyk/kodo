@@ -26,20 +26,43 @@ kodo_sql() {
     sqlite3 -cmd ".timeout 5000" "$KODO_DB" "$1"
 }
 
-# Parse a value from a flat TOML file
-# Usage: kodo_toml_get <file> <key>
+# Parse a value from a TOML file, optionally within a [section]
+# Usage: kodo_toml_get <file> <key>            — first match (flat)
+#        kodo_toml_get <file> <section> <key>   — match within [section]
 kodo_toml_get() {
-    local file="$1" key="$2"
-    grep -m1 "^${key}[[:space:]]*=" "$file" 2>/dev/null \
-        | sed 's/^[^=]*=[[:space:]]*//' \
-        | sed 's/^"//;s/"[[:space:]]*$//' \
-        | sed "s/^'//;s/'[[:space:]]*$//"
+    local file="$1"
+    if [[ $# -ge 3 ]]; then
+        # Section-aware: extract value from within [section] block
+        local section="$2" key="$3"
+        awk -v section="$section" -v key="$key" '
+            /^\[/ { in_section = ($0 ~ "^\\[" section "\\]") }
+            in_section && $0 ~ "^" key "[[:space:]]*=" {
+                sub(/^[^=]*=[[:space:]]*/, "")
+                # Strip inline comments (unquoted # after value)
+                if (/^"/) { sub(/"[[:space:]]*#.*$/, "\"") }
+                else if (/^'\''/) { sub(/'\''[[:space:]]*#.*$/, "'\''") }
+                else { sub(/[[:space:]]*#.*$/, "") }
+                gsub(/^["'\'']|["'\''][[:space:]]*$/, "")
+                print; exit
+            }
+        ' "$file" 2>/dev/null
+    else
+        # Flat: first match anywhere (backward compatible)
+        local key="$2"
+        grep -m1 "^${key}[[:space:]]*=" "$file" 2>/dev/null \
+            | sed 's/^[^=]*=[[:space:]]*//' \
+            | sed 's/^"\([^"]*\)".*/\1/' \
+            | sed "s/^'\([^']*\)'.*/\1/" \
+            | sed 's/[[:space:]]*#.*$//'
+    fi
 }
 
 # Parse a boolean from TOML (returns 0 for true, 1 for false)
+# Usage: kodo_toml_bool <file> <key>            — flat
+#        kodo_toml_bool <file> <section> <key>   — section-aware
 kodo_toml_bool() {
     local val
-    val="$(kodo_toml_get "$1" "$2")"
+    val="$(kodo_toml_get "$@")"
     [[ "$val" == "true" ]]
 }
 

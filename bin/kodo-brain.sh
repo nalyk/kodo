@@ -83,8 +83,12 @@ classify_event() {
             if _is_external "$payload"; then
                 domains="mkt"
             fi
-            # Technical comments also go to dev
-            domains="${domains:+$domains }dev"
+            # Only route technical comments to dev (keyword heuristic)
+            local comment_body
+            comment_body=$(echo "$payload" | jq -r '.body // ""' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+            if echo "$comment_body" | grep -qiE "bug|fix|error|crash|stack.?trace|regression|patch|PR|pull.?request|commit|branch|merge|test|lint|CI|build|fail|broken|null|undefined|exception|segfault|panic|deadlock"; then
+                domains="${domains:+$domains }dev"
+            fi
             ;;
         ReleaseEvent)
             domains="mkt"
