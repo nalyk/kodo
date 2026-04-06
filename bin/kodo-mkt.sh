@@ -13,15 +13,17 @@ kodo_init_db
 
 readonly EVENT_ID="${1:-}"
 readonly REPO_TOML="${2:-}"
-readonly DOMAIN="${3:-mkt}"
+# Domain is always "mkt" for this engine (passed as $3 but unused)
 
 if [[ -z "$EVENT_ID" || -z "$REPO_TOML" ]]; then
     echo "Usage: kodo-mkt.sh <event_id> <repo_toml> [domain]" >&2
     exit 1
 fi
 
-readonly REPO_ID="$(kodo_repo_id "$REPO_TOML")"
-readonly REPO_SLUG="$(kodo_repo_slug "$REPO_TOML")"
+REPO_ID="$(kodo_repo_id "$REPO_TOML")"
+readonly REPO_ID
+REPO_SLUG="$(kodo_repo_slug "$REPO_TOML")"
+readonly REPO_SLUG
 export KODO_TRANSITION_REPO="$REPO_ID"
 
 # Concurrent processing guard
@@ -159,8 +161,8 @@ generate_changelog() {
     local voice
     voice="$(_load_voice)"
 
-    # Get release info and recent commits
-    local release_info commits
+    # Get release info
+    local release_info
     release_info=$("$SCRIPT_DIR/kodo-git.sh" release-get "$REPO_TOML" "$tag" 2>/dev/null) || release_info="{}"
 
     local prompt

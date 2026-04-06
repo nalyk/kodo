@@ -194,7 +194,8 @@ send_weekly_summary() {
     claude_spent=$(kodo_sql "SELECT COALESCE(SUM(cost_usd), 0.0) FROM budget_ledger
         WHERE model = 'claude' AND invoked_at > date('now', 'start of month');")
 
-    local msg="*KODO Weekly Summary*
+    local msg
+    msg="*KODO Weekly Summary*
 Repos: $repo_count | Events: $events_processed (7d)
 Budget: \$${claude_spent}/\$200 (claude)
 Health: $([ "$health_status" -eq 0 ] && echo "ALL CLEAR" || echo "$health_status issues")"

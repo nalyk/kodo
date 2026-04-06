@@ -5,7 +5,8 @@ set -euo pipefail
 
 readonly KODO_HOME="${KODO_HOME:-$HOME/.kodo}"
 readonly KODO_DB="${KODO_DB:-$KODO_HOME/kodo.db}"
-readonly KODO_LOCK_DIR="$KODO_HOME"
+readonly KODO_LOCK_DIR="$KODO_HOME" # used by kodo-brain.sh for flock
+export KODO_LOCK_DIR
 readonly KODO_LOG_DIR="$KODO_HOME/logs"
 
 # Initialize database if it doesn't exist
@@ -314,6 +315,7 @@ _extract_json() {
     # Robust path: python3 handles nested braces, code fences, preamble
     if command -v python3 >/dev/null 2>&1; then
         local result
+        # shellcheck disable=SC2016 # Python code, not shell — single quotes intentional
         result=$(python3 -c '
 import sys, json, re
 
@@ -362,11 +364,13 @@ sys.exit(1)
 
     # Fallback: sed + jq for simple cases (no python3)
     local stripped
+    # shellcheck disable=SC2016 # sed patterns use $ literally, not shell expansion
     stripped=$(echo "$input" | sed -n '/^```json$/,/^```$/{//!p;}')
     if [[ -n "$stripped" ]] && echo "$stripped" | jq -e 'type == "object"' >/dev/null 2>&1; then
         echo "$stripped" | jq -c '.'
         return 0
     fi
+    # shellcheck disable=SC2016
     stripped=$(echo "$input" | sed -n '/^```$/,/^```$/{//!p;}')
     if [[ -n "$stripped" ]] && echo "$stripped" | jq -e 'type == "object"' >/dev/null 2>&1; then
         echo "$stripped" | jq -c '.'

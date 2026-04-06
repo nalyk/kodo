@@ -130,7 +130,6 @@ main() {
     kodo_log "SCOUT: starting scan cycle"
 
     local toml_count=0
-    local event_count=0
 
     for toml in "$KODO_HOME/repos/"*.toml; do
         [[ "$(basename "$toml")" == "_template.toml" ]] && continue

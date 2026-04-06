@@ -186,7 +186,8 @@ Analyze: velocity trends, priority recommendations, roadmap status, technical de
 
     # Post report as GitHub issue (if weekly_report enabled)
     if kodo_toml_bool "$toml" "pm" "weekly_report"; then
-        local issue_title="[kodo-pm] Weekly Report — $(date +%Y-%m-%d)"
+        local issue_title
+        issue_title="[kodo-pm] Weekly Report — $(date +%Y-%m-%d)"
         "$SCRIPT_DIR/kodo-git.sh" issue-create "$toml" "$issue_title" "$report_body" 2>/dev/null || {
             kodo_log "PM: weekly issue creation failed for $repo_id (shadow mode or error)"
         }
@@ -194,7 +195,8 @@ Analyze: velocity trends, priority recommendations, roadmap status, technical de
 
     # Send Telegram digest if enabled
     if kodo_toml_bool "$toml" "pm" "telegram_digest"; then
-        local digest="*KODO Weekly — $repo_slug*
+        local digest
+        digest="*KODO Weekly — $repo_slug*
 $(echo "$report" | jq -r '"PRs: \(.velocity.prs_merged) | Issues: \(.velocity.issues_closed)/\(.velocity.issues_opened) | Trend: \(.velocity.trend)"' 2>/dev/null)"
         kodo_send_telegram "$digest"
     fi

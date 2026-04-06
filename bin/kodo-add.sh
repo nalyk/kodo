@@ -10,40 +10,43 @@ source "$SCRIPT_DIR/kodo-lib.sh"
 
 kodo_init_db
 
-readonly INPUT="${1:-}"
-readonly PROVIDER="${3:-github}"
+main() {
+    local input="${1:-}"
+    local provider="${3:-github}"
 
-if [[ -z "$INPUT" || "$INPUT" != *"/"* ]]; then
-    echo "Usage: kodo-add.sh <owner/repo> [--provider github]" >&2
-    echo "  Example: kodo-add.sh acme/api" >&2
-    exit 1
-fi
+    if [[ -z "$input" || "$input" != *"/"* ]]; then
+        echo "Usage: kodo-add.sh <owner/repo> [--provider github]" >&2
+        echo "  Example: kodo-add.sh acme/api" >&2
+        exit 1
+    fi
 
-readonly OWNER="${INPUT%%/*}"
-readonly REPO="${INPUT#*/}"
-readonly REPO_ID="${OWNER}-${REPO}"
-readonly TOML_PATH="$KODO_HOME/repos/${REPO_ID}.toml"
+    local owner="${input%%/*}"
+    local repo="${input#*/}"
+    local repo_id="${owner}-${repo}"
+    local toml_path="$KODO_HOME/repos/${repo_id}.toml"
 
-if [[ -f "$TOML_PATH" ]]; then
-    echo "Repo already registered: $TOML_PATH" >&2
-    echo "Remove it first if you want to re-onboard." >&2
-    exit 1
-fi
+    if [[ -f "$toml_path" ]]; then
+        echo "Repo already registered: $toml_path" >&2
+        echo "Remove it first if you want to re-onboard." >&2
+        exit 1
+    fi
 
-# ── Phase 1: Discovering ────────────────────────────────────
+    # ── Phase 1: Discovering ────────────────────────────────────
 
-echo "=== Phase 1: Discovering $OWNER/$REPO ==="
+    echo "=== Phase 1: Discovering $owner/$repo ==="
 
-# Create a temporary TOML to use kodo-git.sh for discovery
-local_tmp=$(mktemp)
-trap 'rm -f "$local_tmp"' EXIT
-cat > "$local_tmp" <<EOF
+    # Create a temporary TOML to use kodo-git.sh for discovery
+    local tmp_toml
+    tmp_toml=$(mktemp)
+    trap 'rm -f "$tmp_toml"' EXIT
+    cat > "$tmp_toml" <<EOF
 [repo]
-owner = "$OWNER"
-name = "$REPO"
-provider = "$PROVIDER"
+owner = "$owner"
+name = "$repo"
+provider = "$provider"
 mode = "shadow"
 branch_default = "main"
+enabled = true
 
 [dev]
 enabled = true
@@ -55,19 +58,23 @@ enabled = true
 enabled = true
 EOF
 
-# Use Claude for auto-discovery if available
-if kodo_cli_available claude; then
-    echo "Using Claude for intelligent discovery..."
+    local lang="unknown" branch="main" test_cmd="echo no-tests" lint_cmd="echo no-lint"
 
-    # Gather raw data from GitHub
-    local pr_data issue_data
-    pr_data=$("$SCRIPT_DIR/kodo-git.sh" pr-list "$local_tmp" 2>/dev/null) || pr_data="[]"
-    issue_data=$("$SCRIPT_DIR/kodo-git.sh" issue-list "$local_tmp" 2>/dev/null) || issue_data="[]"
+    # Use Claude for auto-discovery if available
+    if kodo_cli_available claude; then
+        echo "Using Claude for intelligent discovery..."
 
-    local repo_api_data
-    repo_api_data=$("$SCRIPT_DIR/kodo-git.sh" repo-info "$local_tmp" 2>/dev/null) || repo_api_data="{}"
+        # Gather raw data from GitHub
+        local pr_data
+        pr_data=$("$SCRIPT_DIR/kodo-git.sh" pr-list "$tmp_toml" 2>/dev/null) || pr_data="[]"
+        local issue_data
+        issue_data=$("$SCRIPT_DIR/kodo-git.sh" issue-list "$tmp_toml" 2>/dev/null) || issue_data="[]"
 
-    local prompt="Analyze this repository: $OWNER/$REPO
+        local repo_api_data
+        repo_api_data=$("$SCRIPT_DIR/kodo-git.sh" repo-info "$tmp_toml" 2>/dev/null) || repo_api_data="{}"
+
+        local prompt
+        prompt="Analyze this repository: $owner/$repo
 
 API data: $repo_api_data
 Recent PRs count: $(echo "$pr_data" | jq 'length' 2>/dev/null || echo "0")
@@ -75,55 +82,47 @@ Open issues count: $(echo "$issue_data" | jq 'length' 2>/dev/null || echo "0")
 
 Discover: language, CI system, test command, lint command, default branch, labels, conventions."
 
-    local discovery
-    discovery=$(kodo_invoke_llm claude "$prompt" \
-        --schema "$KODO_HOME/schemas/discovery.schema.json" \
-        --timeout 120 \
-        --repo "$OWNER/$REPO" \
-        --domain "onboard") || discovery=""
+        local discovery
+        discovery=$(kodo_invoke_llm claude "$prompt" \
+            --schema "$KODO_HOME/schemas/discovery.schema.json" \
+            --timeout 120 \
+            --repo "$owner/$repo" \
+            --domain "onboard") || discovery=""
 
-    if [[ -n "$discovery" ]]; then
-        # Extract discovered values
-        local lang branch test_cmd lint_cmd
-        lang=$(echo "$discovery" | jq -r '.language // "unknown"' 2>/dev/null)
-        branch=$(echo "$discovery" | jq -r '.branch_default // "main"' 2>/dev/null)
-        test_cmd=$(echo "$discovery" | jq -r '.test_command // "echo no-tests"' 2>/dev/null)
-        lint_cmd=$(echo "$discovery" | jq -r '.lint_command // "echo no-lint"' 2>/dev/null)
+        if [[ -n "$discovery" ]]; then
+            lang=$(echo "$discovery" | jq -r '.language // "unknown"' 2>/dev/null)
+            branch=$(echo "$discovery" | jq -r '.branch_default // "main"' 2>/dev/null)
+            test_cmd=$(echo "$discovery" | jq -r '.test_command // "echo no-tests"' 2>/dev/null)
+            lint_cmd=$(echo "$discovery" | jq -r '.lint_command // "echo no-lint"' 2>/dev/null)
+        fi
+    else
+        echo "Claude unavailable — using basic discovery..."
 
-        echo "  Language: $lang"
-        echo "  Branch: $branch"
-        echo "  Tests: $test_cmd"
-        echo "  Lint: $lint_cmd"
+        local repo_info
+        repo_info=$("$SCRIPT_DIR/kodo-git.sh" repo-info "$tmp_toml" 2>/dev/null) || repo_info="{}"
+
+        lang=$(echo "$repo_info" | jq -r '.language // "unknown"' 2>/dev/null)
+        branch=$(echo "$repo_info" | jq -r '.default_branch // "main"' 2>/dev/null)
     fi
-else
-    echo "Claude unavailable — using basic discovery..."
-
-    # Basic discovery via kodo-git.sh
-    local repo_info
-    repo_info=$("$SCRIPT_DIR/kodo-git.sh" repo-info "$local_tmp" 2>/dev/null) || repo_info="{}"
-
-    local lang branch
-    lang=$(echo "$repo_info" | jq -r '.language // "unknown"' 2>/dev/null)
-    branch=$(echo "$repo_info" | jq -r '.default_branch // "main"' 2>/dev/null)
-    test_cmd="echo no-tests"
-    lint_cmd="echo no-lint"
 
     echo "  Language: $lang"
     echo "  Branch: $branch"
-fi
+    echo "  Tests: $test_cmd"
+    echo "  Lint: $lint_cmd"
 
-# ── Phase 2: Generate TOML ──────────────────────────────────
+    # ── Phase 2: Generate TOML ──────────────────────────────────
 
-echo ""
-echo "=== Phase 2: Generating config ==="
+    echo ""
+    echo "=== Phase 2: Generating config ==="
 
-cat > "$TOML_PATH" <<TOML
+    cat > "$toml_path" <<TOML
 [repo]
-owner = "$OWNER"
-name = "$REPO"
-provider = "$PROVIDER"
+owner = "$owner"
+name = "$repo"
+provider = "$provider"
 mode = "shadow"
 branch_default = "${branch:-main}"
+enabled = true
 
 [dev]
 enabled = true
@@ -148,61 +147,60 @@ feature_evaluation = true
 telegram_digest = false
 TOML
 
-echo "  Config written: $TOML_PATH"
+    echo "  Config written: $toml_path"
 
-# ── Phase 3: Validate ───────────────────────────────────────
+    # ── Phase 3: Validate ───────────────────────────────────────
 
-echo ""
-echo "=== Phase 3: Validating ==="
-
-local validation_ok=true
-
-# Check gh auth
-if ! gh auth status >/dev/null 2>&1; then
-    echo "  FAIL: gh not authenticated"
-    validation_ok=false
-fi
-
-# Check repo access
-if ! gh api "repos/$OWNER/$REPO" >/dev/null 2>&1; then
-    echo "  FAIL: cannot access $OWNER/$REPO"
-    validation_ok=false
-else
-    echo "  OK: repo accessible"
-fi
-
-# Check branch exists
-if gh api "repos/$OWNER/$REPO/branches/${branch:-main}" >/dev/null 2>&1; then
-    echo "  OK: branch '${branch:-main}' exists"
-else
-    echo "  WARN: branch '${branch:-main}' not found — may need adjustment"
-fi
-
-echo "  OK: mode = shadow (safe)"
-
-if [[ "$validation_ok" == "false" ]]; then
     echo ""
-    echo "Validation failed. Fix issues and re-run."
-    rm "$TOML_PATH"
-    rm "$local_tmp"
-    exit 1
-fi
+    echo "=== Phase 3: Validating ==="
 
-# ── Phase 4: Initialize ─────────────────────────────────────
+    local validation_ok=true
 
-echo ""
-echo "=== Phase 4: Initializing shadow mode ==="
+    # Check gh auth
+    if ! gh auth status >/dev/null 2>&1; then
+        echo "  FAIL: gh not authenticated"
+        validation_ok=false
+    fi
 
-# Initialize repo metrics
-kodo_sql "INSERT OR IGNORE INTO repo_metrics (repo) VALUES ('$(kodo_sql_escape "$REPO_ID")');"
+    # Check repo access
+    if ! gh api "repos/$owner/$repo" >/dev/null 2>&1; then
+        echo "  FAIL: cannot access $owner/$repo"
+        validation_ok=false
+    else
+        echo "  OK: repo accessible"
+    fi
 
-echo "  Repo registered in shadow mode"
-echo "  Next scout cycle will start detecting events"
-echo "  Shadow mode: all engines run but take NO write actions"
-echo ""
-echo "Done: $OWNER/$REPO onboarded as shadow"
-echo "  Config: $TOML_PATH"
-echo "  Monitor: kodo-status.sh"
-echo "  Promote to live: edit mode = \"live\" in TOML"
+    # Check branch exists
+    if gh api "repos/$owner/$repo/branches/${branch:-main}" >/dev/null 2>&1; then
+        echo "  OK: branch '${branch:-main}' exists"
+    else
+        echo "  WARN: branch '${branch:-main}' not found — may need adjustment"
+    fi
 
-rm -f "$local_tmp"
+    echo "  OK: mode = shadow (safe)"
+
+    if [[ "$validation_ok" == "false" ]]; then
+        echo ""
+        echo "Validation failed. Fix issues and re-run."
+        rm -f "$toml_path"
+        exit 1
+    fi
+
+    # ── Phase 4: Initialize ─────────────────────────────────────
+
+    echo ""
+    echo "=== Phase 4: Initializing shadow mode ==="
+
+    kodo_sql "INSERT OR IGNORE INTO repo_metrics (repo) VALUES ('$(kodo_sql_escape "$repo_id")');"
+
+    echo "  Repo registered in shadow mode"
+    echo "  Next scout cycle will start detecting events"
+    echo "  Shadow mode: all engines run but take NO write actions"
+    echo ""
+    echo "Done: $owner/$repo onboarded as shadow"
+    echo "  Config: $toml_path"
+    echo "  Monitor: kodo-status.sh"
+    echo "  Promote to live: edit mode = \"live\" in TOML"
+}
+
+main "$@"

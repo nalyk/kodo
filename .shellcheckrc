@@ -1,0 +1,3 @@
+# ShellCheck config for KODO
+# Follow source directives to resolve cross-file references
+source-path=bin
