@@ -151,6 +151,15 @@ dispatch_engine() {
 main() {
     local processed=0
 
+    # Throttle: max 3 concurrent engine processes across all phases
+    # Use local counter to avoid race condition (background PIDs not yet in DB)
+    local max_concurrent=3
+    local active_count
+    active_count=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
+        WHERE processing_pid IS NOT NULL AND processing_pid > 0
+        AND state NOT IN ('resolved', 'closed', 'published', 'reported', 'deferred');")
+    active_count="${active_count:-0}"
+
     # Phase 1: Process new pending events
     local events
     events=$(kodo_sql "SELECT event_id, repo, event_type, payload_json
@@ -182,7 +191,13 @@ main() {
                 if [[ "$existing" -gt 0 ]]; then
                     continue
                 fi
-                dispatch_engine "$domain" "$event_id" "$repo" "$payload" || dispatch_ok=false
+                # Throttle: skip if too many engines running
+                if [[ "$active_count" -ge "$max_concurrent" ]]; then
+                    kodo_log "BRAIN: throttled — $active_count engines running (max $max_concurrent)"
+                    dispatch_ok=false
+                    break 2
+                fi
+                dispatch_engine "$domain" "$event_id" "$repo" "$payload" && active_count=$((active_count + 1)) || dispatch_ok=false
             done
 
             # Only remove from pending if all dispatches succeeded
@@ -243,8 +258,15 @@ main() {
 
             [[ ! -x "$engine_script" ]] && continue
 
+            # Throttle check
+            if [[ "$active_count" -ge "$max_concurrent" ]]; then
+                kodo_log "BRAIN: throttled stall recovery — $active_count engines running"
+                break
+            fi
+
             kodo_log "BRAIN: advancing stalled $event_id [$domain] (state: $state)"
             "$engine_script" "$event_id" "$toml" "$domain" >> "$KODO_LOG_DIR/${domain}.log" 2>&1 &
+            active_count=$((active_count + 1))
 
         done <<< "$stalled"
     fi

@@ -51,6 +51,18 @@ transition() {
     "$SCRIPT_DIR/kodo-transition.sh" "$EVENT_ID" "$1" "$2" "dev"
 }
 
+# Get PR number: pipeline metadata first (issue-driven), then payload (PR-driven)
+_get_pr_num() {
+    local num
+    num=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_number")
+    if [[ -z "$num" || "$num" == "null" ]]; then
+        local payload
+        payload="$(get_payload)"
+        num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+    fi
+    echo "$num"
+}
+
 defer() {
     local reason="$1"
     transition "$(get_state)" "deferred"
@@ -368,11 +380,18 @@ COMMITMSG
     rm -f "$git_stderr"
 
     # Step 7: Push branch + create PR (shadow mode blocks via kodo-git.sh)
-    "$SCRIPT_DIR/kodo-git.sh" branch-push "$REPO_TOML" "$work_dir" "$branch_name" 2>/dev/null || {
+    local push_stderr
+    push_stderr=$(mktemp); _KODO_TMPFILES+=("$push_stderr")
+    "$SCRIPT_DIR/kodo-git.sh" branch-push "$REPO_TOML" "$work_dir" "$branch_name" 2>"$push_stderr"
+    local push_rc=$?
+    if [[ "$push_rc" -eq 3 ]]; then
+        kodo_log "DEV: branch push blocked by shadow mode"
+    elif [[ "$push_rc" -ne 0 ]]; then
+        kodo_log "DEV: branch push failed (rc=$push_rc): $(head -c 300 "$push_stderr" 2>/dev/null)"
         "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
         defer "branch push failed"
         return
-    }
+    fi
 
     local pr_body
     pr_body="## Fix for #$issue_num
@@ -428,9 +447,8 @@ do_hard_gates() {
     max_diff="$(kodo_toml_get "$REPO_TOML" "max_diff_lines")"
     max_diff="${max_diff:-500}"
 
-    local payload pr_num
-    payload="$(get_payload)"
-    pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+    local pr_num
+    pr_num=$(_get_pr_num)
 
     local gate_failed=""
 
@@ -462,7 +480,7 @@ do_auditing() {
 
     local payload pr_num
     payload="$(get_payload)"
-    pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+    pr_num=$(_get_pr_num)
 
     local confidence=0
     local review_output=""
@@ -471,7 +489,7 @@ do_auditing() {
     if _claude_available; then
         review_model="claude"
         local diff=""
-        if [[ -n "$pr_num" && "$EVENT_ID" == *"PullRequestEvent"* ]]; then
+        if [[ -n "$pr_num" ]]; then
             diff=$("$SCRIPT_DIR/kodo-git.sh" pr-diff "$REPO_TOML" "$pr_num" 2>/dev/null | head -500) || diff=""
         fi
 
@@ -785,9 +803,8 @@ _check_ci_and_merge() {
 do_auto_merge() {
     kodo_log "DEV: auto-merging $EVENT_ID"
 
-    local payload pr_num
-    payload="$(get_payload)"
-    pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+    local pr_num
+    pr_num=$(_get_pr_num)
 
     if [[ -z "$pr_num" ]]; then
         defer "no PR number for merge"
@@ -819,9 +836,8 @@ do_auto_merge() {
 do_guarded_merge() {
     kodo_log "DEV: guarded merge $EVENT_ID (48h CI window)"
 
-    local payload pr_num
-    payload="$(get_payload)"
-    pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+    local pr_num
+    pr_num=$(_get_pr_num)
 
     if [[ -z "$pr_num" ]]; then
         defer "no PR number for guarded merge"
