@@ -21,6 +21,7 @@ feedback_window_minutes = 10            # How long to wait for bot reviews (minu
 max_feedback_rounds = 2                 # Max suggestion-apply cycles before proceeding to audit
 apply_bot_suggestions = true            # Auto-apply code suggestions from trusted bots
 trusted_review_bots = ["gemini-code-assist[bot]", "coderabbit[bot]"]
+max_rebase_attempts = 2                 # Max server-side rebase retries before deferring
 
 [mkt]
 enabled = true                          # Enable marketing engine

@@ -80,6 +80,30 @@ _gh_pr_checks() {
     }'
 }
 
+# Check if PR is mergeable (MERGEABLE, CONFLICTING, UNKNOWN) and branch status (CLEAN, BEHIND, DIRTY)
+_gh_pr_mergeable() {
+    local slug="$1" pr_num="$2"
+    gh pr view "$pr_num" --repo "$slug" \
+        --json mergeable,mergeStateStatus,headRefName,baseRefName \
+        2>/dev/null || echo '{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}'
+}
+
+# Server-side branch update (rebase from base branch)
+# Returns: 0 = rebased cleanly, 1 = conflict, 2 = API error
+_gh_pr_rebase() {
+    local slug="$1" pr_num="$2"
+    local response
+    if response=$(gh api "repos/${slug}/pulls/${pr_num}/update-branch" \
+            -X PUT -f update_method=rebase 2>&1); then
+        return 0
+    fi
+    # 422 = merge conflict
+    if echo "$response" | grep -qiE "merge conflict|cannot be updated|unprocessable"; then
+        return 1
+    fi
+    return 2
+}
+
 _gh_pr_diff() {
     local slug="$1" pr_num="$2"
     gh pr diff "$pr_num" --repo "$slug"
@@ -338,7 +362,7 @@ main() {
     shift 2
 
     # Write actions require shadow mode check
-    local write_actions="pr-comment pr-merge pr-create branch-push issue-comment issue-close issue-label issue-create release-edit discussion-create pr-apply-suggestion"
+    local write_actions="pr-comment pr-merge pr-create branch-push issue-comment issue-close issue-label issue-create release-edit discussion-create pr-apply-suggestion pr-rebase"
     if [[ " $write_actions " == *" $action "* ]]; then
         _guard_write "$toml" "$action" || return $?
     fi
@@ -368,6 +392,8 @@ main() {
                 pr-create)          _gh_pr_create "$slug" "$@" ;;
                 issue-get)          _gh_issue_get "$slug" "$@" ;;
                 branch-push)        _gh_branch_push "$@" ;;
+                pr-mergeable)       _gh_pr_mergeable "$slug" "$@" ;;
+                pr-rebase)          _gh_pr_rebase "$slug" "$@" ;;
                 pr-reviews)         _gh_pr_reviews "$slug" "$@" ;;
                 pr-review-comments) _gh_pr_review_comments "$slug" "$@" ;;
                 pr-apply-suggestion) _gh_pr_apply_suggestion "$@" ;;

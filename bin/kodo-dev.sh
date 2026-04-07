@@ -510,6 +510,16 @@ do_hard_gates() {
         return
     fi
 
+    # Post-rebase: skip feedback loop, go straight to audit (code already reviewed)
+    local post_rebase
+    post_rebase=$(kodo_pipeline_get "$EVENT_ID" "dev" "post_rebase")
+    if [[ "$post_rebase" == "true" ]]; then
+        kodo_log "DEV: post-rebase re-verification — skipping feedback"
+        kodo_pipeline_set "$EVENT_ID" "dev" "post_rebase" ""
+        transition "hard_gates" "auditing"
+        return
+    fi
+
     # KODO-generated PRs: wait for bot feedback before auditing (if enabled)
     local kodo_pr_num
     kodo_pr_num=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_number")
@@ -1133,9 +1143,71 @@ Review the change for correctness, security, and safety. Cast your vote.")"
     fi
 }
 
+# ── Rebase-on-Conflict ───────────────────────────────────────
+# Try server-side rebase when PR branch is behind base.
+# Returns: 0 = rebased (re-check required), 1 = unresolvable conflict, 2 = no rebase needed
+
+_attempt_rebase() {
+    local pr_num="$1"
+
+    # Cap rebase retries (configurable, default 2)
+    local rebase_count
+    rebase_count=$(kodo_pipeline_get "$EVENT_ID" "dev" "rebase_count")
+    rebase_count="${rebase_count:-0}"
+    local max_rebases
+    max_rebases=$(kodo_toml_get "$REPO_TOML" "dev" "max_rebase_attempts")
+    max_rebases="${max_rebases:-2}"
+    if [[ "$rebase_count" -ge "$max_rebases" ]]; then
+        kodo_log "DEV: rebase attempt limit ($rebase_count/$max_rebases) — giving up"
+        return 1
+    fi
+
+    # Query GitHub mergeability
+    local merge_info mergeable merge_state
+    merge_info=$("$SCRIPT_DIR/kodo-git.sh" pr-mergeable "$REPO_TOML" "$pr_num" 2>/dev/null) || merge_info='{}'
+    mergeable=$(echo "$merge_info" | jq -r '.mergeable // "UNKNOWN"' 2>/dev/null)
+    merge_state=$(echo "$merge_info" | jq -r '.mergeStateStatus // "UNKNOWN"' 2>/dev/null)
+
+    kodo_log "DEV: PR #$pr_num mergeable=$mergeable state=$merge_state"
+
+    # CLEAN = no rebase needed
+    if [[ "$merge_state" == "CLEAN" || "$merge_state" == "HAS_HOOKS" ]]; then
+        return 2
+    fi
+
+    # BEHIND + MERGEABLE = server-side rebase can fix it
+    if [[ "$mergeable" == "MERGEABLE" && "$merge_state" == "BEHIND" ]]; then
+        kodo_log "DEV: PR #$pr_num is BEHIND — server-side rebase (attempt $((rebase_count + 1))/$max_rebases)"
+        local rc=0
+        "$SCRIPT_DIR/kodo-git.sh" pr-rebase "$REPO_TOML" "$pr_num" 2>/dev/null || rc=$?
+        case "$rc" in
+            0)  rebase_count=$((rebase_count + 1))
+                kodo_pipeline_set "$EVENT_ID" "dev" "rebase_count" "$rebase_count"
+                kodo_log "DEV: rebase succeeded"
+                return 0
+                ;;
+            3)  kodo_log "DEV: rebase blocked by shadow mode — proceeding as-is"
+                return 2
+                ;;
+            *)  kodo_log "DEV: rebase failed (rc=$rc)"
+                return 1
+                ;;
+        esac
+    fi
+
+    # CONFLICTING = cannot auto-resolve
+    if [[ "$mergeable" == "CONFLICTING" ]]; then
+        kodo_log "DEV: PR #$pr_num has merge conflicts — unresolvable"
+        return 1
+    fi
+
+    # UNKNOWN = GitHub hasn't computed yet — proceed, merge will tell us
+    return 2
+}
+
 # ── CI-Aware Merge ──────────────────────────────────────────
 # Shared CI check logic used by both auto_merge and guarded_merge.
-# Returns: 0=green (merge), 1=pending (yield, Brain re-dispatches later), 2=red (defer)
+# Returns: 0=merged, 1=pending (yield), 2=failed (defer), 3=rebased (loop back to hard_gates)
 
 _check_ci_and_merge() {
     local pr_num="$1" merge_type="$2"
@@ -1161,6 +1233,12 @@ _check_ci_and_merge() {
 
         case "$ci_state" in
             FAILURE)
+                # CI failure may be caused by outdated branch — try rebase
+                local rebase_rc=0
+                _attempt_rebase "$pr_num" || rebase_rc=$?
+                if [[ "$rebase_rc" -eq 0 ]]; then
+                    return 3  # Rebased — re-run CI
+                fi
                 kodo_log "DEV: CI FAILED — not merging PR #$pr_num"
                 return 2
                 ;;
@@ -1177,8 +1255,18 @@ _check_ci_and_merge() {
         esac
     fi
 
-    # CI green or no checks → merge
+    # Pre-merge: check if branch needs rebase
+    local rebase_rc=0
+    _attempt_rebase "$pr_num" || rebase_rc=$?
+    case "$rebase_rc" in
+        0) return 3 ;;  # Rebased — caller loops back through hard_gates
+        1) return 2 ;;  # Unresolvable conflict
+        2) ;;           # Clean — proceed to merge
+    esac
+
+    # CI green + branch clean → merge
     "$SCRIPT_DIR/kodo-git.sh" pr-merge "$REPO_TOML" "$pr_num" 2>/dev/null || {
+        kodo_log "DEV: merge failed for PR #$pr_num"
         return 2
     }
 
@@ -1204,16 +1292,17 @@ do_auto_merge() {
     _check_ci_and_merge "$pr_num" "auto_merge" || ci_result=$?
 
     case "$ci_result" in
-        0)  # Success — record clean merge
-            kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
+        0)  kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
                 VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'clean');"
             transition "auto_merge" "releasing"
             ;;
-        1)  # CI pending — don't transition, let Brain re-dispatch later
-            kodo_log "DEV: auto_merge waiting for CI — engine yielding"
+        1)  kodo_log "DEV: auto_merge waiting for CI — engine yielding"
             ;;
-        2)  # CI failed or merge failed
-            defer "CI failed or merge rejected for PR #$pr_num"
+        2)  defer "CI failed or merge rejected for PR #$pr_num"
+            ;;
+        3)  kodo_log "DEV: PR #$pr_num rebased — re-verifying through hard_gates"
+            kodo_pipeline_set "$EVENT_ID" "dev" "post_rebase" "true"
+            transition "auto_merge" "hard_gates"
             ;;
     esac
 }
@@ -1251,12 +1340,16 @@ do_guarded_merge() {
 
     case "$ci_result" in
         0)  kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
-                VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'clean');"
+                Values ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'clean');"
             transition "guarded_merge" "releasing"
             ;;
         1)  kodo_log "DEV: guarded_merge waiting for CI — engine yielding"
             ;;
         2)  defer "CI failed or merge rejected for PR #$pr_num"
+            ;;
+        3)  kodo_log "DEV: PR #$pr_num rebased — re-verifying through hard_gates"
+            kodo_pipeline_set "$EVENT_ID" "dev" "post_rebase" "true"
+            transition "guarded_merge" "hard_gates"
             ;;
     esac
 }
@@ -1284,7 +1377,7 @@ do_reverting() {
 # Loops through states until a terminal state or a blocking operation.
 # One invocation drives the event as far as it can go — no re-dispatch needed.
 
-readonly MAX_STEPS=16
+readonly MAX_STEPS=24
 
 main() {
     local state
