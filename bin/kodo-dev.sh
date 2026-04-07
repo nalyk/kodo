@@ -335,12 +335,12 @@ Read relevant source files. Make minimal changes. Match existing patterns. Do NO
                 ;;
             qwen)
                 fix_result=$(cd "$work_dir" && timeout 600 qwen -p "$exec_prompt" \
-                    --approval-mode auto-edit -o json </dev/null 2>"$gen_stderr") || fix_result=""
+                    --approval-mode yolo -o json </dev/null 2>"$gen_stderr") || fix_result=""
                 kodo_log_budget "qwen" "$REPO_ID" "dev" 0 0 0.0
                 ;;
             gemini)
                 fix_result=$(cd "$work_dir" && timeout 600 gemini -p "$exec_prompt" \
-                    --approval-mode auto_edit \
+                    --yolo \
                     </dev/null 2>"$gen_stderr") || fix_result=""
                 kodo_log_budget "gemini" "$REPO_ID" "dev" 0 0 0.0
                 ;;
@@ -454,9 +454,9 @@ Fix the failing tests. Do NOT change production code — only fix the test files
                 if [[ "$gen_cli" == "codex" ]]; then
                     timeout 300 codex exec --full-auto --cd "$work_dir" "$fix_prompt" </dev/null 2>/dev/null || true
                 elif [[ "$gen_cli" == "qwen" ]]; then
-                    (cd "$work_dir" && timeout 300 qwen -p "$fix_prompt" --approval-mode auto-edit </dev/null 2>/dev/null) || true
+                    (cd "$work_dir" && timeout 300 qwen -p "$fix_prompt" --approval-mode yolo </dev/null 2>/dev/null) || true
                 elif [[ "$gen_cli" == "gemini" ]]; then
-                    (cd "$work_dir" && timeout 300 gemini -p "$fix_prompt" --approval-mode auto_edit </dev/null 2>/dev/null) || true
+                    (cd "$work_dir" && timeout 300 gemini -p "$fix_prompt" --yolo </dev/null 2>/dev/null) || true
                 fi
 
                 _hb
