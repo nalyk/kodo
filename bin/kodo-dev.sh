@@ -82,7 +82,7 @@ _claude_available() {
     fi
     # Quick ping test
     local result
-    result=$(timeout 30 claude -p "respond with exactly: pong" --max-turns 1 2>/dev/null) || return 1
+    result=$(timeout 30 claude -p "respond with exactly: pong" --max-turns 1 </dev/null 2>/dev/null) || return 1
     [[ "$result" == *"pong"* ]]
 }
 
@@ -277,7 +277,7 @@ Do NOT commit. Just make the file changes.")"
             --output-format json \
             --max-turns 20 \
             --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(git diff:*)" "Bash(git status:*)" "Bash(git log:*)" "Bash(ls:*)" "Bash(find:*)" \
-            2>"$gen_stderr") || {
+            </dev/null 2>"$gen_stderr") || {
             kodo_log "DEV: claude code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
             fix_result=""
         }
@@ -298,7 +298,7 @@ Do NOT commit. Just make the file changes.")"
         local gen_stderr
         gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
         fix_result=$(cd "$work_dir" && timeout 600 codex exec \
-            "Fix issue #$issue_num: $issue_title. $issue_body. Make minimal changes only." 2>"$gen_stderr") || {
+            "Fix issue #$issue_num: $issue_title. $issue_body. Make minimal changes only." </dev/null 2>"$gen_stderr") || {
             kodo_log "DEV: codex code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
             fix_result=""
         }

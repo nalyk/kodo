@@ -118,7 +118,7 @@ Guidelines:
 - Do NOT use the word 'excited'")"
 
     local message
-    message=$(timeout 60 gemini -p "$prompt" 2>/dev/null) || {
+    message=$(timeout 60 gemini -p "$prompt" </dev/null 2>/dev/null) || {
         transition "drafting" "deferred"
         return
     }
@@ -180,7 +180,7 @@ Guidelines:
 - Use markdown formatting")"
 
     local changelog
-    changelog=$(timeout 120 gemini -p "$prompt" 2>/dev/null) || {
+    changelog=$(timeout 120 gemini -p "$prompt" </dev/null 2>/dev/null) || {
         transition "drafting" "deferred"
         return
     }

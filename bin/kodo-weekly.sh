@@ -34,7 +34,7 @@ do_health_check() {
     # Check Claude specifically (ping test)
     if kodo_cli_available claude; then
         local ping_result
-        ping_result=$(timeout 30 claude -p "respond: pong" --max-turns 1 2>/dev/null) || ping_result=""
+        ping_result=$(timeout 30 claude -p "respond: pong" --max-turns 1 </dev/null 2>/dev/null) || ping_result=""
         if [[ "$ping_result" == *"pong"* ]]; then
             echo "  claude ping: OK"
         else
