@@ -482,7 +482,14 @@ ${schema_content}"
             fi
             raw_output=$(timeout "$timeout_s" "$cli" -p "$structured_prompt" </dev/null 2>"$llm_stderr_file") || {
                 local exit_code=$?
-                _llm_log_fail "$cli" "$repo" "$domain" "exit=$exit_code $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
+                local stderr_head
+                stderr_head=$(head -c 500 "$llm_stderr_file" 2>/dev/null)
+                # Detect quota/rate limit errors in stderr
+                if echo "$stderr_head" | grep -qiE "quota|rate.limit|exhausted|capacity"; then
+                    _llm_log_fail "$cli" "$repo" "$domain" "QUOTA EXHAUSTED — $cli unavailable"
+                else
+                    _llm_log_fail "$cli" "$repo" "$domain" "exit=$exit_code $stderr_head"
+                fi
                 rm -f "$llm_stderr_file"; return 1
             }
             result=$(_extract_json "$raw_output") || {

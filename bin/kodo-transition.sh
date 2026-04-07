@@ -20,6 +20,7 @@ declare -A DEV_TRANSITIONS=(
     ["triaging:generating"]=1
     ["triaging:auditing"]=1
     ["triaging:auto_merge"]=1
+    ["triaging:hard_gates"]=1
     ["triaging:deferred"]=1
     ["generating:hard_gates"]=1
     ["generating:deferred"]=1

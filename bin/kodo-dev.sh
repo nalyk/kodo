@@ -168,6 +168,15 @@ _triage_issue() {
         return
     fi
 
+    # If a PR already exists from a prior run, skip code gen and go to feedback/audit
+    local existing_pr
+    existing_pr=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_number")
+    if [[ -n "$existing_pr" && "$existing_pr" != "null" ]]; then
+        kodo_log "DEV: issue #$issue_num — PR #$existing_pr exists, re-entering feedback loop"
+        transition "triaging" "hard_gates"
+        return
+    fi
+
     # Bug/fix/test/enhancement → code generation
     kodo_log "DEV: issue #$issue_num — generating path (code fix)"
     transition "triaging" "generating"
@@ -1181,9 +1190,8 @@ do_balloting() {
     local total=0
     local vote_log=""
 
-    local payload pr_num
-    payload="$(get_payload)"
-    pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+    local pr_num
+    pr_num=$(_get_pr_num)
 
     local diff=""
     if [[ -n "$pr_num" ]]; then
@@ -1191,7 +1199,7 @@ do_balloting() {
     fi
 
     local pr_title
-    pr_title=$(echo "$payload" | jq -r '.title // "unknown"' 2>/dev/null)
+    pr_title=$(get_payload | jq -r '.title // "unknown"' 2>/dev/null)
 
     local ballot_prompt
     ballot_prompt="$(kodo_prompt "You are voting on whether to merge this code change to $REPO_SLUG.
