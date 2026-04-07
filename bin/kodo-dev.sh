@@ -418,7 +418,7 @@ _Automated analysis by KŌDŌ | Event: $EVENT_ID | Model: ${gen_cli}_" 2>/dev/nu
 
             # Extract last 50 lines of test output as error context
             local test_error
-            test_error=$(echo "$test_output" | tail -50)
+            test_error=$(echo "$test_output" | tail -100)
 
             local fix_prompt="The code you generated for issue #$issue_num has test failures.
 
@@ -428,23 +428,48 @@ $test_error
 
 Fix the failing tests. Do NOT change production code — only fix the test files. Make minimal changes."
 
-            if [[ "$gen_cli" == "codex" ]]; then
-                timeout 300 codex exec --full-auto --cd "$work_dir" "$fix_prompt" </dev/null 2>/dev/null || true
-            elif [[ "$gen_cli" == "qwen" ]]; then
-                (cd "$work_dir" && timeout 300 qwen -p "$fix_prompt" --approval-mode auto-edit </dev/null 2>/dev/null) || true
-            elif [[ "$gen_cli" == "gemini" ]]; then
-                (cd "$work_dir" && timeout 300 gemini -p "$fix_prompt" </dev/null 2>/dev/null) || true
-            fi
+            # Retry loop: give the CLI up to 3 attempts to fix test failures
+            local max_test_retries=3
+            local test_retry=0
+            local tests_fixed=false
+            while [[ "$test_retry" -lt "$max_test_retries" ]]; do
+                test_retry=$((test_retry + 1))
+                _hb
+                kodo_log "DEV: test fix attempt $test_retry/$max_test_retries with $gen_cli"
 
-            # Re-run tests after fix attempt
-            if ! (cd "$work_dir" && timeout 120 bash -c "$test_cmd") >/dev/null 2>&1; then
-                kodo_log "DEV: tests still fail after retry — deferring"
+                if [[ "$gen_cli" == "codex" ]]; then
+                    timeout 300 codex exec --full-auto --cd "$work_dir" "$fix_prompt" </dev/null 2>/dev/null || true
+                elif [[ "$gen_cli" == "qwen" ]]; then
+                    (cd "$work_dir" && timeout 300 qwen -p "$fix_prompt" --approval-mode auto-edit </dev/null 2>/dev/null) || true
+                elif [[ "$gen_cli" == "gemini" ]]; then
+                    (cd "$work_dir" && timeout 300 gemini -p "$fix_prompt" </dev/null 2>/dev/null) || true
+                fi
+
+                _hb
+                local retest_output
+                retest_output=$(cd "$work_dir" && timeout 120 bash -c "$test_cmd" 2>&1) && {
+                    tests_fixed=true
+                    break
+                }
+                # Update error context for next retry
+                test_error=$(echo "$retest_output" | tail -100)
+                fix_prompt="The code you generated for issue #$issue_num STILL has test failures (attempt $test_retry/$max_test_retries).
+
+Test command: $test_cmd
+Test output (last 100 lines):
+$test_error
+
+Fix the failing tests. Do NOT change production code. Make minimal changes."
+            done
+
+            if [[ "$tests_fixed" != "true" ]]; then
+                kodo_log "DEV: tests fail after $max_test_retries retries — deferring"
                 "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
-                defer "generated code fails tests after retry"
+                defer "generated code fails tests after $max_test_retries retries"
                 return
             fi
             _hb
-            kodo_log "DEV: tests pass after fix retry"
+            kodo_log "DEV: tests pass after retry $test_retry"
         }
     fi
 
