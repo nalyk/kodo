@@ -297,8 +297,9 @@ Do NOT commit. Just make the file changes.")"
 
         local gen_stderr
         gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
-        fix_result=$(cd "$work_dir" && timeout 600 codex exec \
-            "Fix issue #$issue_num: $issue_title. $issue_body. Make minimal changes only." </dev/null 2>"$gen_stderr") || {
+        fix_result=$(timeout 600 codex exec --full-auto --cd "$work_dir" \
+            "Fix issue #$issue_num: $issue_title. $issue_body. Make minimal changes only." \
+            </dev/null 2>"$gen_stderr") || {
             kodo_log "DEV: codex code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
             fix_result=""
         }
@@ -390,7 +391,7 @@ $test_error
 Fix the failing tests. Do NOT change production code — only fix the test files. Make minimal changes."
 
             if [[ "$gen_cli" == "codex" ]]; then
-                (cd "$work_dir" && timeout 300 codex exec "$fix_prompt" </dev/null 2>/dev/null) || true
+                timeout 300 codex exec --full-auto --cd "$work_dir" "$fix_prompt" </dev/null 2>/dev/null || true
             elif [[ "$gen_cli" == "claude" ]]; then
                 (cd "$work_dir" && timeout 300 claude -p "$fix_prompt" \
                     --output-format json --max-turns 10 \
