@@ -177,6 +177,8 @@ do_generating() {
     kodo_log "DEV: generating code fix for $EVENT_ID"
     # Heartbeat shorthand — prevents brain from thinking this engine is stalled
     _hb() { kodo_heartbeat "$EVENT_ID" "dev"; }
+    # Debug trap: log if the function exits unexpectedly
+    trap 'kodo_log "DEV: UNEXPECTED EXIT in do_generating at line $LINENO (exit=$?)"' RETURN
 
     # Code gen: Codex → Qwen → Gemini (Phase B tries each). Claude = architect only (Phase A).
     local gen_cli="codex"
@@ -495,9 +497,11 @@ COMMITMSG
         return
     }
     rm -f "$git_stderr"
+    kodo_log "DEV: commit done for #$issue_num — proceeding to push"
 
     _hb
     # Step 7: Push branch + create PR (shadow mode blocks via kodo-git.sh)
+    kodo_log "DEV: pushing branch $branch_name"
     local push_stderr
     push_stderr=$(mktemp); _KODO_TMPFILES+=("$push_stderr")
     "$SCRIPT_DIR/kodo-git.sh" branch-push "$REPO_TOML" "$work_dir" "$branch_name" 2>"$push_stderr"
