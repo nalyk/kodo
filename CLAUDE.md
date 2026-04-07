@@ -48,6 +48,7 @@ Budget: $200/month. You are the expensive model — use wisely. Delegate bulk wo
 5. ALWAYS include `event_id` in branch names, commit messages, and state transitions
 6. ALWAYS verify `repo_mode` (shadow | live) before write actions
 7. ALWAYS be honest about uncertainty — a confident wrong answer is worse than "I don't know"
+8. ALWAYS redirect `</dev/null` on CLI invocations — cron has no stdin, CLI tools block without it
 
 ---
 
@@ -75,13 +76,17 @@ feed the transition decisions made by engine scripts.
 
 ### Dev Domain
 ```
-[*] → pending → triaging ─┬─► generating → hard_gates → auditing → scanning ─┬─► auto_merge → releasing → resolved
-                           ├─► auditing (PRs)                                  ├─► balloting → guarded_merge → releasing
-                           ├─► auto_merge (deps, zero LLM)                     └─► deferred (retry max 2) → closed
-                           └─► deferred (docs, duplicates, wontfix)
+[*] → pending → triaging ─┬─► generating → hard_gates ─┬─► awaiting_feedback → applying_suggestions → hard_gates (loop)
+                           ├─► auditing (PRs)            ├─► auditing → scanning ─┬─► auto_merge → releasing → resolved
+                           ├─► hard_gates (deps)         │                         ├─► balloting → guarded_merge → releasing
+                           └─► deferred                  └─► auto_merge (deps)     └─► deferred (retry max 2) → closed
+
+                           Rebase loop: auto_merge/guarded_merge → hard_gates (on BEHIND/conflict)
 ```
 Note: Engine loops through all states in one invocation. CI status is checked before every merge.
 Concurrent processing is PID-locked — two engines cannot process the same event simultaneously.
+Bot feedback (Gemini Code Assist, CodeRabbit) is awaited for KODO-generated PRs before auditing.
+Server-side rebase is attempted when branch is behind base — loops back through hard_gates for re-verification.
 
 ### Marketing Domain
 ```
@@ -107,17 +112,18 @@ No preamble, no explanation, no markdown wrapping. Just the JSON object.
 | `schemas/triage.schema.json` | Issue triage: priority, labels, duplicates, stale flags |
 | `schemas/discovery.schema.json` | Repo discovery: language, CI, conventions |
 | `schemas/pm-report.schema.json` | PM weekly: velocity, priorities, roadmap, debt |
+| `schemas/feedback.schema.json` | PR feedback classification: sentiment, suggestions, confidence delta |
 
 ---
 
 ## Quality Gates
 
-1. **Layer 1** — Hard gates (deterministic, no LLM): tests, semgrep, diff size, scope
-2. **Layer 1.5** — Auto-generated regression tests (Codex)
-3. **Layer 2** — LLM review (you: confidence scoring via confidence.schema.json)
-4. **Layer 2.5** — Security scan (semgrep on changed files, confidence penalty for findings)
+1. **Layer 1** — Hard gates (deterministic, no LLM): tests, lint, diff size, scope
+2. **Layer 1.5** — Bot feedback loop: await reviews from trusted bots (Gemini Code Assist, CodeRabbit), auto-apply suggestions, adjust confidence
+3. **Layer 2** — LLM review (you: confidence scoring via confidence.schema.json, with feedback delta applied)
+4. **Layer 2.5** — Security scan (semgrep on checked-out PR branch, confidence penalty for findings)
 5. **Layer 3** — Balloting (you + Gemini + Qwen vote in parallel, 2/3 consensus for medium confidence)
-6. **Pre-merge** — CI status check (`pr-checks`): green required, pending = yield, red = defer
+6. **Pre-merge** — Mergeability check + auto-rebase if BEHIND base, CI status check: green required, pending = yield, red = defer
 7. **Post-merge** — 48h rollback window
 
 ## Budget Enforcement
@@ -193,8 +199,8 @@ cron (4 entries)
 | IssueCommentEvent (technical) | DEV |
 
 ### Database Tables
-`pipeline_state` · `pending_events` · `community_log` · `pm_artifacts` · `budget_ledger` · `repo_metrics` · `merge_outcomes` · `deferred_queue` · `confidence_bands`
+`pipeline_state` · `pending_events` · `community_log` · `pm_artifacts` · `budget_ledger` · `repo_metrics` · `merge_outcomes` · `deferred_queue` · `confidence_bands` · `pr_feedback`
 
-Key columns in `pipeline_state`: `payload_json` (event data from GitHub), `metadata_json` (inter-state data: confidence, model, ballot results, CI state), `processing_pid` (concurrent processing lock).
+Key columns in `pipeline_state`: `payload_json` (event data from GitHub), `metadata_json` (inter-state data: confidence, model, ballot results, CI state, feedback delta, rebase count), `processing_pid` (concurrent processing lock).
 
 Schema: `sql/schema.sql`

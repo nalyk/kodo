@@ -27,6 +27,7 @@ Claude (strategy/review), Codex (code generation), Gemini (content), Qwen (triag
 6. NEVER auto-merge with confidence below 90
 7. NEVER act on repos not registered in `repos/*.toml`
 8. NEVER parse free-text LLM output — ALL structured data uses `--json-schema`
+9. NEVER invoke CLI tools without `</dev/null` — cron has no stdin, CLI tools block without it
 
 ### ALWAYS
 
@@ -34,6 +35,7 @@ Claude (strategy/review), Codex (code generation), Gemini (content), Qwen (triag
 2. ALWAYS include `event_id` in outputs when processing pipeline events
 3. ALWAYS be honest about uncertainty — a confident wrong answer is worse than "I don't know"
 4. ALWAYS respect the voice profile when generating content for a repo
+5. ALWAYS redirect `</dev/null` on every CLI invocation (claude, codex, gemini, qwen)
 
 ---
 
@@ -58,14 +60,18 @@ Every pipeline event follows a deterministic state machine per domain.
 You do NOT control transitions — `kodo-transition.sh` does. Your outputs
 feed the transition decisions made by the engine scripts.
 
-- Dev: pending → triaging → generating/auditing/auto_merge/deferred → hard_gates → scanning → merge/ballot → releasing → resolved
+- Dev: pending → triaging → generating → hard_gates → awaiting_feedback → applying_suggestions → hard_gates (loop) → auditing → scanning → auto_merge/balloting → releasing → resolved
+- Rebase: auto_merge/guarded_merge → hard_gates (when branch BEHIND base)
 - Mkt: pending → drafting → reviewing → published
 - PM: pending → analyzing → reported
 
 Engines loop through all states in one invocation (no re-dispatch needed for each state).
-CI status is checked before every merge — PENDING causes the engine to yield, FAILURE causes defer.
+CI status is checked before every merge — PENDING causes the engine to yield, FAILURE attempts rebase first.
+Bot feedback (Gemini Code Assist, CodeRabbit) is awaited before auditing KODO-generated PRs.
+Trusted bot suggestions are auto-applied; CHANGES_REQUESTED causes immediate defer.
 Concurrent processing is PID-locked — two engines cannot process the same event simultaneously.
 Invalid transitions are rejected. Deferred events retry max 2 times, then auto-close.
+Feedback rounds and rebase attempts are configurable per repo via TOML.
 
 ---
 
@@ -80,6 +86,7 @@ Available schemas:
 - `triage.schema.json` — issue triage output (priority, labels, duplicates, stale flags)
 - `discovery.schema.json` — repo auto-discovery output (language, CI, conventions)
 - `pm-report.schema.json` — PM weekly analysis (velocity, priorities, roadmap, debt)
+- `feedback.schema.json` — PR feedback classification (sentiment, suggestions, confidence delta)
 
 For Claude: schemas are passed via `--json-schema` + `--output-format json`.
 For Gemini/Qwen: schemas are injected into the prompt by `kodo_invoke_llm()`.

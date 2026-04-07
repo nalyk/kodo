@@ -28,7 +28,7 @@ You have repos. Things happen in them — PRs open, issues pile up, releases shi
 
 KŌDŌ handles it. Three engines run in parallel:
 
-**Dev** — Reviews every PR with structured confidence scoring. Score ≥90: auto-merge. Score 50-89: three AI models vote in parallel, 2/3 consensus required. Score <50: deferred, you deal with it. Hard gates (tests, semgrep, diff size) run *before* any AI touches it. CI status verified before every merge. 48h post-merge rollback window. Dependency updates from Dependabot/Renovate take a zero-LLM fast path — detected, merged, released in under a second.
+**Dev** — Reviews every PR with structured confidence scoring. Score ≥90: auto-merge. Score 50-89: three AI models vote in parallel, 2/3 consensus required. Score <50: deferred, you deal with it. Hard gates (tests, lint, semgrep, diff size) run *before* any AI touches it. Bot feedback loop: waits for reviews from Gemini Code Assist / CodeRabbit, auto-applies code suggestions, adjusts confidence. Auto-rebase when branch falls behind base. CI status verified before every merge. 48h post-merge rollback window. Dependency updates from Dependabot/Renovate take a zero-LLM fast path through hard gates — detected, tested, merged in seconds.
 
 **Marketing** — Welcomes first-time contributors within minutes. Generates changelogs from commit history. Curates good-first-issues. Runs contributor spotlights. All with the repo's own voice, not generic AI slop.
 
@@ -60,13 +60,17 @@ When Claude goes down, the system doesn't make bad decisions. It queues events, 
 Every merge goes through this gauntlet:
 
 ```
-hard gates (tests, semgrep, diff ≤ 500 lines, scope check)
+hard gates (tests, lint, semgrep, diff ≤ 500 lines)
     ↓ all pass
-auto-generated regression tests (Codex writes tests for the diff)
-    ↓ no surprises
-confidence review (Claude scores 0-100, structured JSON)
+bot feedback (wait for Gemini Code Assist / CodeRabbit reviews)
+    ↓ suggestions? → auto-apply → re-run hard gates
+    ↓ blocking concerns? → defer
+    ↓ clean or window expired
+confidence review (Claude scores 0-100, structured JSON, with feedback delta)
     ↓ score ≥ 90
-CI status check (gh pr checks — green required)
+mergeability check → BEHIND? → server-side rebase → re-verify
+    ↓ clean
+CI status check (green required)
     ↓ CI green
 auto-merge → 48h rollback window → resolved
 
@@ -84,7 +88,7 @@ Shadow mode runs the entire pipeline but takes zero write actions. Flip one TOML
 
 Concurrent processing is PID-locked — two Brain cycles can't dispatch the same event to the same engine. Stale PIDs from crashed processes are detected and reclaimed automatically.
 
-All state transitions go through one file (`kodo-transition.sh`). Invalid transitions are rejected. The state machine has 30+ transitions across three domains and every single one is explicitly enumerated.
+All state transitions go through one file (`kodo-transition.sh`). Invalid transitions are rejected. The state machine has 40+ transitions across three domains and every single one is explicitly enumerated.
 
 ---
 
@@ -92,12 +96,12 @@ All state transitions go through one file (`kodo-transition.sh`). Invalid transi
 
 ```
 ~/.kodo/
-├── bin/                      11 scripts, ~3200 lines
+├── bin/                      11 scripts, ~4500 lines
 ├── context/runtime-rules.md  shared rules injected into every LLM prompt
-├── schemas/                  5 JSON schemas — all LLM output is structured
+├── schemas/                  6 JSON schemas — all LLM output is structured
 ├── repos/                    per-repo TOML configs (auto-generated on onboard)
 ├── crontab.txt               4 lines. the whole schedule
-└── kodo.db                   SQLite. 9 tables. the brain's memory
+└── kodo.db                   SQLite. 10 tables. the brain's memory
 ```
 
 GitHub day-one. GitLab day-one. Gitea/Bitbucket: adapter ready, endpoints stubbed.
