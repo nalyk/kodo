@@ -177,8 +177,6 @@ do_generating() {
     kodo_log "DEV: generating code fix for $EVENT_ID"
     # Heartbeat shorthand — prevents brain from thinking this engine is stalled
     _hb() { kodo_heartbeat "$EVENT_ID" "dev"; }
-    # Debug trap: log if the function exits unexpectedly
-    trap 'kodo_log "DEV: UNEXPECTED EXIT in do_generating at line $LINENO (exit=$?)"' RETURN
 
     # Code gen: Codex → Qwen → Gemini (Phase B tries each). Claude = architect only (Phase A).
     local gen_cli="codex"
@@ -214,26 +212,39 @@ do_generating() {
     default_branch="$(kodo_toml_get "$REPO_TOML" "branch_default")"
     default_branch="${default_branch:-main}"
 
+    # Step 2-3: Clone repo + setup branch
+    # If kodo branch already exists (from a prior run), clone it to continue work.
+    # Otherwise, clone default branch and create new kodo branch.
+    local branch_name="kodo/dev/${EVENT_ID}"
     local work_dir
-    work_dir=$("$SCRIPT_DIR/kodo-git.sh" repo-clone "$REPO_TOML" "$default_branch" 2>/dev/null) || {
-        defer "repo clone failed"
-        return
+
+    # Check if our branch already exists on remote
+    local branch_exists=""
+    branch_exists=$("$SCRIPT_DIR/kodo-git.sh" repo-clone "$REPO_TOML" "$branch_name" 2>/dev/null) && {
+        if [[ -n "$branch_exists" && -d "$branch_exists" ]]; then
+            work_dir="$branch_exists"
+            kodo_log "DEV: cloned existing branch $branch_name"
+        fi
     }
+
+    # If branch doesn't exist yet, clone default branch and create it
+    if [[ -z "$work_dir" ]]; then
+        work_dir=$("$SCRIPT_DIR/kodo-git.sh" repo-clone "$REPO_TOML" "$default_branch" 2>/dev/null) || {
+            defer "repo clone failed"
+            return
+        }
+        "$SCRIPT_DIR/kodo-git.sh" branch-create "$work_dir" "$branch_name" 2>/dev/null || {
+            "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
+            defer "branch creation failed"
+            return
+        }
+        kodo_log "DEV: created new branch $branch_name"
+    fi
 
     kodo_log "DEV: cloned to $work_dir"
     kodo_pipeline_set "$EVENT_ID" "dev" "work_dir" "$work_dir"
-
-    # Guarantee cleanup on any exit — use EXIT trap with guard variable
-    # (RETURN trap doesn't propagate reliably through case dispatch)
+    kodo_pipeline_set "$EVENT_ID" "dev" "pr_branch" "$branch_name"
     _KODO_WORKDIR_CLEANUP="$work_dir"
-
-    # Step 3: Create a kodo branch
-    local branch_name="kodo/dev/${EVENT_ID}"
-    "$SCRIPT_DIR/kodo-git.sh" branch-create "$work_dir" "$branch_name" 2>/dev/null || {
-        "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
-        defer "branch creation failed"
-        return
-    }
 
     # Step 4: TWO-PHASE CODE GENERATION
     # Phase A: Claude ANALYZES issue + codebase → produces detailed implementation plan (read-only, ~$0.30)
