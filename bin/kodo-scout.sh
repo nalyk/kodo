@@ -55,6 +55,11 @@ scan_pull_requests() {
 
         [[ "$pr_state" != "open" ]] && continue
 
+        # Skip PRs created by KODO (kodo/ branch prefix) — already tracked as IssuesEvents
+        local head_branch
+        head_branch=$(echo "$pr" | jq -r '.headRefName // ""' 2>/dev/null)
+        [[ "$head_branch" == kodo/* ]] && continue
+
         local event_id
         event_id="$(_event_key "$repo_id" "PullRequestEvent" "$pr_num")"
 

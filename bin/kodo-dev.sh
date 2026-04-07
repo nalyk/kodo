@@ -340,6 +340,7 @@ Read relevant source files. Make minimal changes. Match existing patterns. Do NO
                 ;;
             gemini)
                 fix_result=$(cd "$work_dir" && timeout 600 gemini -p "$exec_prompt" \
+                    --approval-mode auto_edit \
                     </dev/null 2>"$gen_stderr") || fix_result=""
                 kodo_log_budget "gemini" "$REPO_ID" "dev" 0 0 0.0
                 ;;
@@ -455,7 +456,7 @@ Fix the failing tests. Do NOT change production code — only fix the test files
                 elif [[ "$gen_cli" == "qwen" ]]; then
                     (cd "$work_dir" && timeout 300 qwen -p "$fix_prompt" --approval-mode auto-edit </dev/null 2>/dev/null) || true
                 elif [[ "$gen_cli" == "gemini" ]]; then
-                    (cd "$work_dir" && timeout 300 gemini -p "$fix_prompt" </dev/null 2>/dev/null) || true
+                    (cd "$work_dir" && timeout 300 gemini -p "$fix_prompt" --approval-mode auto_edit </dev/null 2>/dev/null) || true
                 fi
 
                 _hb
@@ -1246,15 +1247,20 @@ Review the change for correctness, security, and safety. Cast your vote.")"
         local cli_name
         cli_name=$(basename "$vfile" .json)
         local vote score reason
-        vote=$(jq -r '.vote // "error"' "$vfile" 2>/dev/null)
-        score=$(jq -r '.score // 0' "$vfile" 2>/dev/null)
-        reason=$(jq -r '.reason // "no reason"' "$vfile" 2>/dev/null | head -c 120)
+        vote=$(jq -r '.vote // "error"' "$vfile" 2>/dev/null | head -1 | tr -d '[:space:]')
+        score=$(jq -r '.score // 0' "$vfile" 2>/dev/null | head -1 | tr -d '[:space:]')
+        reason=$(jq -r '.reason // "no reason"' "$vfile" 2>/dev/null | head -1 | head -c 120)
 
         [[ "$vote" == "error" ]] && continue
 
         kodo_log "DEV: ballot $cli_name: $vote ($score) — $reason"
         vote_log="${vote_log}${cli_name}:${vote}:${score} "
         total=$((total + 1))
+        # Validate numeric score before comparison
+        if ! [[ "$score" =~ ^[0-9]+$ ]]; then
+            kodo_log "DEV: ballot $cli_name non-numeric score: $score — skipping"
+            continue
+        fi
         [[ "$vote" == "approve" && "$score" -ge 50 ]] && votes=$((votes + 1))
     done
 
