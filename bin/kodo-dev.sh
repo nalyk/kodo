@@ -176,17 +176,9 @@ _triage_issue() {
 do_generating() {
     kodo_log "DEV: generating code fix for $EVENT_ID"
 
-    # Determine which CLI to use for code generation
-    # Codex primary ($20/mo), Qwen fallback (free). Claude NEVER does code gen — review/strategy only.
-    local gen_cli=""
-    # Codex primary ($20/mo), Qwen/Gemini fallback (free). Claude NEVER does code gen.
-    if kodo_cli_available codex; then
-        gen_cli="codex"
-    elif kodo_cli_available qwen; then
-        gen_cli="qwen"
-    elif kodo_cli_available gemini; then
-        gen_cli="gemini"
-    else
+    # Code gen: Codex → Qwen → Gemini (Phase B tries each). Claude = architect only (Phase A).
+    local gen_cli="codex"
+    if ! kodo_cli_available codex && ! kodo_cli_available qwen && ! kodo_cli_available gemini; then
         defer "no code generation CLI available (need codex, qwen, or gemini)"
         return
     fi
@@ -238,16 +230,19 @@ do_generating() {
         return
     }
 
-    # Step 4: Run Claude/Codex with FULL repo context (working directory = cloned repo)
-    # Claude Code reads the codebase when run from the repo directory
+    # Step 4: TWO-PHASE CODE GENERATION
+    # Phase A: Claude ANALYZES issue + codebase → produces detailed implementation plan (read-only, ~$0.30)
+    # Phase B: Codex/Qwen/Gemini EXECUTES the plan (writes files, free or cheap)
+    # Claude is the architect. Free-tier CLIs are the builders.
     local fix_result=""
+    local implementation_plan=""
 
+    # Phase A: Claude reads codebase and creates implementation plan
+    if kodo_cli_available claude && kodo_check_budget "claude"; then
+        kodo_log "DEV: Phase A — Claude analyzing issue #$issue_num"
 
-    if [[ "$gen_cli" == "claude" ]]; then
-        kodo_log "DEV: running claude -p in $work_dir for issue #$issue_num"
-
-        local prompt
-        prompt="$(kodo_prompt "You are fixing issue #$issue_num in $REPO_SLUG.
+        local analysis_prompt
+        analysis_prompt="$(kodo_prompt "You are the technical lead for $REPO_SLUG. Analyze issue #$issue_num and produce a DETAILED implementation plan.
 
 Title: $issue_title
 
@@ -257,134 +252,93 @@ ${issue_comments:+
 Recent comments:
 $issue_comments}
 
-Instructions:
-1. Read the relevant source files to understand the codebase
-2. Implement a minimal, focused fix for this issue
-3. Only change what is necessary — no refactoring, no unrelated changes
-4. Match existing code style exactly
-5. If the fix requires tests, add them
+YOUR TASK: Read the relevant source files and produce an implementation plan with:
+1. EXACT file paths to modify or create
+2. EXACT code to add/modify — complete snippets, not pseudocode
+3. Imports and dependencies needed
+4. Test patterns from existing tests (read them first)
 
-Do NOT commit. Just make the file changes.")"
+DO NOT modify any files. ONLY read and produce the plan as text.")"
 
-        # Budget check before expensive Claude invocation
-        if ! kodo_check_budget "claude"; then
-            defer "claude budget exhausted"
-            return
-        fi
-
-        # Run Claude from within the cloned repo directory
-        # --allowedTools grants headless file write permission (without it, claude -p refuses writes)
-        local gen_stderr
-        gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
-        fix_result=$(cd "$work_dir" && timeout 600 claude -p "$prompt" \
+        local plan_stderr
+        plan_stderr=$(mktemp); _KODO_TMPFILES+=("$plan_stderr")
+        local plan_result
+        plan_result=$(cd "$work_dir" && timeout 300 claude -p "$analysis_prompt" \
             --output-format json \
-            --max-turns 20 \
-            --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(git diff:*)" "Bash(git status:*)" "Bash(git log:*)" "Bash(ls:*)" "Bash(find:*)" \
-            </dev/null 2>"$gen_stderr") || {
-            kodo_log "DEV: claude code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
-            fix_result=""
-        }
-        rm -f "$gen_stderr"
+            --max-turns 15 \
+            --allowedTools "Read" "Glob" "Grep" "Bash(find:*)" "Bash(ls:*)" "Bash(head:*)" "Bash(wc:*)" \
+            </dev/null 2>"$plan_stderr") || plan_result=""
+        rm -f "$plan_stderr"
 
-        if [[ -n "$fix_result" ]]; then
+        if [[ -n "$plan_result" ]]; then
+            implementation_plan=$(echo "$plan_result" | jq -r '.result // ""' 2>/dev/null)
             local cost
-            cost=$(echo "$fix_result" | jq -r '.total_cost_usd // 0' 2>/dev/null)
-            local tokens_in tokens_out
-            tokens_in=$(echo "$fix_result" | jq -r '.usage.input_tokens // 0' 2>/dev/null)
-            tokens_out=$(echo "$fix_result" | jq -r '.usage.output_tokens // 0' 2>/dev/null)
-            kodo_log_budget "claude" "$REPO_ID" "dev" "$tokens_in" "$tokens_out" "$cost"
+            cost=$(echo "$plan_result" | jq -r '.total_cost_usd // 0' 2>/dev/null)
+            kodo_log_budget "claude" "$REPO_ID" "dev" 0 0 "${cost:-0}"
+            kodo_log "DEV: Claude plan ready (${#implementation_plan} chars)"
+        else
+            kodo_log "DEV: Claude analysis failed — builders will work without plan"
         fi
-
-    elif [[ "$gen_cli" == "codex" ]]; then
-        kodo_log "DEV: running codex in $work_dir for issue #$issue_num"
-
-        local gen_stderr
-        gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
-        fix_result=$(timeout 600 codex exec --full-auto --cd "$work_dir" \
-            "Fix issue #$issue_num: $issue_title. $issue_body. Make minimal changes only." \
-            </dev/null 2>"$gen_stderr") || {
-            kodo_log "DEV: codex code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
-            fix_result=""
-        }
-        rm -f "$gen_stderr"
-        if [[ -n "$fix_result" ]]; then
-            kodo_log_budget "codex" "$REPO_ID" "dev" 0 0 0.50
-        fi
-
-    elif [[ "$gen_cli" == "qwen" ]]; then
-        kodo_log "DEV: running qwen in $work_dir for issue #$issue_num"
-
-        local gen_stderr
-        gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
-        fix_result=$(cd "$work_dir" && timeout 600 qwen -p \
-            "Fix issue #$issue_num: $issue_title. $issue_body. Read relevant files first. Make minimal changes only. Do NOT commit." \
-            --approval-mode auto-edit \
-            -o json \
-            </dev/null 2>"$gen_stderr") || {
-            kodo_log "DEV: qwen code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
-            fix_result=""
-        }
-        rm -f "$gen_stderr"
-        kodo_log_budget "qwen" "$REPO_ID" "dev" 0 0 0.0
-
-    elif [[ "$gen_cli" == "gemini" ]]; then
-        kodo_log "DEV: running gemini in $work_dir for issue #$issue_num"
-
-        local gen_stderr
-        gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
-        fix_result=$(cd "$work_dir" && timeout 600 gemini -p \
-            "Fix issue #$issue_num: $issue_title. $issue_body. Read relevant files first. Make minimal changes only. Do NOT commit." \
-            </dev/null 2>"$gen_stderr") || {
-            kodo_log "DEV: gemini code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
-            fix_result=""
-        }
-        rm -f "$gen_stderr"
-        kodo_log_budget "gemini" "$REPO_ID" "dev" 0 0 0.0
+    else
+        kodo_log "DEV: Claude unavailable — builders will work from issue description only"
     fi
 
-    # Step 4b: If primary CLI produced nothing, fallback chain: Codex → Qwen → Gemini → defer
-    local primary_changed=""
-    # Fallback chain: if primary CLI produced no changes, try next available
-    primary_changed=$(cd "$work_dir" && git diff --name-only 2>/dev/null && git ls-files --others --exclude-standard 2>/dev/null) || primary_changed=""
-    if [[ -z "$primary_changed" ]]; then
-        local fallback_prompt
-        fallback_prompt="You are fixing issue #$issue_num in this repository.
+    # Build execution prompt — with Claude's plan if available
+    local exec_prompt
+    if [[ -n "$implementation_plan" ]]; then
+        exec_prompt="IMPLEMENTATION PLAN — follow it EXACTLY:
 
-Issue: $issue_title
+$implementation_plan
+
+Apply ALL changes described. Create/modify the exact files specified. Match existing code style. Do NOT commit."
+    else
+        exec_prompt="Fix issue #$issue_num: $issue_title
+
 $issue_body
-$(echo "$issue_comments" | head -30)
+${issue_comments:+Context: $(echo "$issue_comments" | head -30)}
 
-Instructions:
-- Read the relevant source files first
-- Make minimal, focused changes
-- Follow existing code style and patterns
-- Do NOT commit. Just make the file changes."
-
-        # Try each fallback in order (skip the one that already failed)
-        for fallback_cli in qwen gemini; do
-            [[ "$fallback_cli" == "$gen_cli" ]] && continue
-            kodo_cli_available "$fallback_cli" || continue
-
-            kodo_log "DEV: $gen_cli produced no changes — falling back to $fallback_cli"
-            gen_cli="$fallback_cli"
-
-            local gen_stderr
-            gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
-            if [[ "$fallback_cli" == "qwen" ]]; then
-                fix_result=$(cd "$work_dir" && timeout 600 qwen -p "$fallback_prompt" \
-                    --approval-mode auto-edit -o json </dev/null 2>"$gen_stderr") || fix_result=""
-            else
-                fix_result=$(cd "$work_dir" && timeout 600 gemini -p "$fallback_prompt" \
-                    </dev/null 2>"$gen_stderr") || fix_result=""
-            fi
-            rm -f "$gen_stderr"
-            kodo_log_budget "$fallback_cli" "$REPO_ID" "dev" 0 0 0.0
-
-            # Check if this fallback produced changes
-            primary_changed=$(cd "$work_dir" && git diff --name-only 2>/dev/null && git ls-files --others --exclude-standard 2>/dev/null) || primary_changed=""
-            [[ -n "$primary_changed" ]] && break
-        done
+Read relevant source files. Make minimal changes. Match existing patterns. Do NOT commit."
     fi
+
+    # Phase B: Execute with Codex → Qwen → Gemini (try each until one produces changes)
+    for exec_cli in codex qwen gemini; do
+        kodo_cli_available "$exec_cli" || continue
+
+        kodo_log "DEV: Phase B — $exec_cli executing for issue #$issue_num"
+        gen_cli="$exec_cli"
+
+        local gen_stderr
+        gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
+        case "$exec_cli" in
+            codex)
+                fix_result=$(timeout 600 codex exec --full-auto --cd "$work_dir" \
+                    "$exec_prompt" </dev/null 2>"$gen_stderr") || fix_result=""
+                [[ -n "$fix_result" ]] && kodo_log_budget "codex" "$REPO_ID" "dev" 0 0 0.50
+                ;;
+            qwen)
+                fix_result=$(cd "$work_dir" && timeout 600 qwen -p "$exec_prompt" \
+                    --approval-mode auto-edit -o json </dev/null 2>"$gen_stderr") || fix_result=""
+                kodo_log_budget "qwen" "$REPO_ID" "dev" 0 0 0.0
+                ;;
+            gemini)
+                fix_result=$(cd "$work_dir" && timeout 600 gemini -p "$exec_prompt" \
+                    </dev/null 2>"$gen_stderr") || fix_result=""
+                kodo_log_budget "gemini" "$REPO_ID" "dev" 0 0 0.0
+                ;;
+        esac
+        rm -f "$gen_stderr"
+
+        # Check if this CLI produced file changes
+        local changes_found=""
+        changes_found=$(cd "$work_dir" && git diff --name-only 2>/dev/null && git ls-files --others --exclude-standard 2>/dev/null) || changes_found=""
+        if [[ -n "$changes_found" ]]; then
+            kodo_log "DEV: $exec_cli produced changes"
+            break
+        fi
+        kodo_log "DEV: $exec_cli produced no changes — trying next"
+    done
+
+    kodo_pipeline_set "$EVENT_ID" "dev" "gen_cli" "$gen_cli"
 
     # Step 5: Check if any files were actually changed
     local tracked_changes untracked_files changed_files
