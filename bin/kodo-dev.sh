@@ -177,14 +177,17 @@ do_generating() {
     kodo_log "DEV: generating code fix for $EVENT_ID"
 
     # Determine which CLI to use for code generation
-    # Prefer Codex ($20/mo budget) over Claude ($200/mo) — Claude is reserved for review/strategy
+    # Codex primary ($20/mo), Qwen fallback (free). Claude NEVER does code gen — review/strategy only.
     local gen_cli=""
+    # Codex primary ($20/mo), Qwen/Gemini fallback (free). Claude NEVER does code gen.
     if kodo_cli_available codex; then
         gen_cli="codex"
-    elif kodo_cli_available claude && kodo_check_budget "claude"; then
-        gen_cli="claude"
+    elif kodo_cli_available qwen; then
+        gen_cli="qwen"
+    elif kodo_cli_available gemini; then
+        gen_cli="gemini"
     else
-        defer "no code generation CLI available (need claude or codex)"
+        defer "no code generation CLI available (need codex, qwen, or gemini)"
         return
     fi
 
@@ -307,18 +310,45 @@ Do NOT commit. Just make the file changes.")"
         if [[ -n "$fix_result" ]]; then
             kodo_log_budget "codex" "$REPO_ID" "dev" 0 0 0.50
         fi
+
+    elif [[ "$gen_cli" == "qwen" ]]; then
+        kodo_log "DEV: running qwen in $work_dir for issue #$issue_num"
+
+        local gen_stderr
+        gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
+        fix_result=$(cd "$work_dir" && timeout 600 qwen -p \
+            "Fix issue #$issue_num: $issue_title. $issue_body. Read relevant files first. Make minimal changes only. Do NOT commit." \
+            --approval-mode auto-edit \
+            -o json \
+            </dev/null 2>"$gen_stderr") || {
+            kodo_log "DEV: qwen code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
+            fix_result=""
+        }
+        rm -f "$gen_stderr"
+        kodo_log_budget "qwen" "$REPO_ID" "dev" 0 0 0.0
+
+    elif [[ "$gen_cli" == "gemini" ]]; then
+        kodo_log "DEV: running gemini in $work_dir for issue #$issue_num"
+
+        local gen_stderr
+        gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
+        fix_result=$(cd "$work_dir" && timeout 600 gemini -p \
+            "Fix issue #$issue_num: $issue_title. $issue_body. Read relevant files first. Make minimal changes only. Do NOT commit." \
+            </dev/null 2>"$gen_stderr") || {
+            kodo_log "DEV: gemini code gen failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
+            fix_result=""
+        }
+        rm -f "$gen_stderr"
+        kodo_log_budget "gemini" "$REPO_ID" "dev" 0 0 0.0
     fi
 
-    # Step 4b: If Codex produced nothing, fallback to Claude (more capable, costlier)
-    local codex_changed=""
-    if [[ "$gen_cli" == "codex" ]]; then
-        codex_changed=$(cd "$work_dir" && git diff --name-only 2>/dev/null && git ls-files --others --exclude-standard 2>/dev/null) || codex_changed=""
-        if [[ -z "$codex_changed" ]] && kodo_cli_available claude && kodo_check_budget "claude"; then
-            kodo_log "DEV: codex produced no changes — falling back to Claude"
-            gen_cli="claude"
-
-            local prompt
-            prompt="You are fixing issue #$issue_num in this repository.
+    # Step 4b: If primary CLI produced nothing, fallback chain: Codex → Qwen → Gemini → defer
+    local primary_changed=""
+    # Fallback chain: if primary CLI produced no changes, try next available
+    primary_changed=$(cd "$work_dir" && git diff --name-only 2>/dev/null && git ls-files --others --exclude-standard 2>/dev/null) || primary_changed=""
+    if [[ -z "$primary_changed" ]]; then
+        local fallback_prompt
+        fallback_prompt="You are fixing issue #$issue_num in this repository.
 
 Issue: $issue_title
 $issue_body
@@ -330,25 +360,30 @@ Instructions:
 - Follow existing code style and patterns
 - Do NOT commit. Just make the file changes."
 
-            if kodo_check_budget "claude"; then
-                local gen_stderr
-                gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
-                fix_result=$(cd "$work_dir" && timeout 600 claude -p "$prompt" \
-                    --output-format json \
-                    --max-turns 20 \
-                    --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(git diff:*)" "Bash(git status:*)" "Bash(git log:*)" "Bash(ls:*)" "Bash(find:*)" \
-                    </dev/null 2>"$gen_stderr") || {
-                    kodo_log "DEV: claude fallback failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
-                    fix_result=""
-                }
-                rm -f "$gen_stderr"
-                if [[ -n "$fix_result" ]]; then
-                    local cost
-                    cost=$(echo "$fix_result" | jq -r '.total_cost_usd // 0' 2>/dev/null)
-                    kodo_log_budget "claude" "$REPO_ID" "dev" 0 0 "${cost:-0}"
-                fi
+        # Try each fallback in order (skip the one that already failed)
+        for fallback_cli in qwen gemini; do
+            [[ "$fallback_cli" == "$gen_cli" ]] && continue
+            kodo_cli_available "$fallback_cli" || continue
+
+            kodo_log "DEV: $gen_cli produced no changes — falling back to $fallback_cli"
+            gen_cli="$fallback_cli"
+
+            local gen_stderr
+            gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
+            if [[ "$fallback_cli" == "qwen" ]]; then
+                fix_result=$(cd "$work_dir" && timeout 600 qwen -p "$fallback_prompt" \
+                    --approval-mode auto-edit -o json </dev/null 2>"$gen_stderr") || fix_result=""
+            else
+                fix_result=$(cd "$work_dir" && timeout 600 gemini -p "$fallback_prompt" \
+                    </dev/null 2>"$gen_stderr") || fix_result=""
             fi
-        fi
+            rm -f "$gen_stderr"
+            kodo_log_budget "$fallback_cli" "$REPO_ID" "dev" 0 0 0.0
+
+            # Check if this fallback produced changes
+            primary_changed=$(cd "$work_dir" && git diff --name-only 2>/dev/null && git ls-files --others --exclude-standard 2>/dev/null) || primary_changed=""
+            [[ -n "$primary_changed" ]] && break
+        done
     fi
 
     # Step 5: Check if any files were actually changed
