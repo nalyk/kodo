@@ -309,6 +309,48 @@ Do NOT commit. Just make the file changes.")"
         fi
     fi
 
+    # Step 4b: If Codex produced nothing, fallback to Claude (more capable, costlier)
+    local codex_changed=""
+    if [[ "$gen_cli" == "codex" ]]; then
+        codex_changed=$(cd "$work_dir" && git diff --name-only 2>/dev/null && git ls-files --others --exclude-standard 2>/dev/null) || codex_changed=""
+        if [[ -z "$codex_changed" ]] && kodo_cli_available claude && kodo_check_budget "claude"; then
+            kodo_log "DEV: codex produced no changes — falling back to Claude"
+            gen_cli="claude"
+
+            local prompt
+            prompt="You are fixing issue #$issue_num in this repository.
+
+Issue: $issue_title
+$issue_body
+$(echo "$issue_comments" | head -30)
+
+Instructions:
+- Read the relevant source files first
+- Make minimal, focused changes
+- Follow existing code style and patterns
+- Do NOT commit. Just make the file changes."
+
+            if kodo_check_budget "claude"; then
+                local gen_stderr
+                gen_stderr=$(mktemp); _KODO_TMPFILES+=("$gen_stderr")
+                fix_result=$(cd "$work_dir" && timeout 600 claude -p "$prompt" \
+                    --output-format json \
+                    --max-turns 20 \
+                    --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(git diff:*)" "Bash(git status:*)" "Bash(git log:*)" "Bash(ls:*)" "Bash(find:*)" \
+                    </dev/null 2>"$gen_stderr") || {
+                    kodo_log "DEV: claude fallback failed: $(head -c 500 "$gen_stderr" 2>/dev/null)"
+                    fix_result=""
+                }
+                rm -f "$gen_stderr"
+                if [[ -n "$fix_result" ]]; then
+                    local cost
+                    cost=$(echo "$fix_result" | jq -r '.total_cost_usd // 0' 2>/dev/null)
+                    kodo_log_budget "claude" "$REPO_ID" "dev" 0 0 "${cost:-0}"
+                fi
+            fi
+        fi
+    fi
+
     # Step 5: Check if any files were actually changed
     local tracked_changes untracked_files changed_files
     tracked_changes=$(cd "$work_dir" && git diff --name-only 2>/dev/null) || tracked_changes=""
