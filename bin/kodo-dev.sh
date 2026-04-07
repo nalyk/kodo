@@ -469,11 +469,10 @@ Fix the failing tests. Do NOT change production code — only fix the test files
 
             if [[ "$gen_cli" == "codex" ]]; then
                 timeout 300 codex exec --full-auto --cd "$work_dir" "$fix_prompt" </dev/null 2>/dev/null || true
-            elif [[ "$gen_cli" == "claude" ]]; then
-                (cd "$work_dir" && timeout 300 claude -p "$fix_prompt" \
-                    --output-format json --max-turns 10 \
-                    --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(git diff:*)" "Bash(ls:*)" \
-                    </dev/null 2>/dev/null) || true
+            elif [[ "$gen_cli" == "qwen" ]]; then
+                (cd "$work_dir" && timeout 300 qwen -p "$fix_prompt" --approval-mode auto-edit </dev/null 2>/dev/null) || true
+            elif [[ "$gen_cli" == "gemini" ]]; then
+                (cd "$work_dir" && timeout 300 gemini -p "$fix_prompt" </dev/null 2>/dev/null) || true
             fi
 
             # Re-run tests after fix attempt
