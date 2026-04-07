@@ -293,6 +293,16 @@ kodo_claim_event() {
     return 1
 }
 
+# Heartbeat: touch updated_at to prevent brain from considering this engine stalled.
+# Call this before/after every long-running operation (LLM calls, git ops, test runs).
+# Usage: kodo_heartbeat <event_id> <domain>
+kodo_heartbeat() {
+    local event_id="$1" domain="$2"
+    kodo_sql "UPDATE pipeline_state SET updated_at = datetime('now')
+        WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")'
+        AND processing_pid = $$;" 2>/dev/null || true
+}
+
 # Release an event after processing
 # Usage: kodo_release_event <event_id> <domain>
 kodo_release_event() {

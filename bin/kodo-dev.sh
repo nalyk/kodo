@@ -175,6 +175,8 @@ _triage_issue() {
 
 do_generating() {
     kodo_log "DEV: generating code fix for $EVENT_ID"
+    # Heartbeat shorthand — prevents brain from thinking this engine is stalled
+    _hb() { kodo_heartbeat "$EVENT_ID" "dev"; }
 
     # Code gen: Codex → Qwen → Gemini (Phase B tries each). Claude = architect only (Phase A).
     local gen_cli="codex"
@@ -202,6 +204,7 @@ do_generating() {
     local issue_comments
     issue_comments=$(echo "$issue_detail" | jq -r '.last_comments[]? | "[\(.author)]: \(.body)"' 2>/dev/null | head -50)
 
+    _hb
     kodo_log "DEV: issue #$issue_num — cloning repo for code generation"
 
     # Step 2: Clone the repo
@@ -239,6 +242,7 @@ do_generating() {
 
     # Phase A: Claude reads codebase and creates implementation plan
     if kodo_cli_available claude && kodo_check_budget "claude"; then
+        _hb
         kodo_log "DEV: Phase A — Claude analyzing issue #$issue_num"
 
         local analysis_prompt
@@ -304,6 +308,7 @@ Read relevant source files. Make minimal changes. Match existing patterns. Do NO
     for exec_cli in codex qwen gemini; do
         kodo_cli_available "$exec_cli" || continue
 
+        _hb
         kodo_log "DEV: Phase B — $exec_cli executing for issue #$issue_num"
         gen_cli="$exec_cli"
 
@@ -400,9 +405,11 @@ _Automated analysis by KŌDŌ | Event: $EVENT_ID | Model: ${gen_cli}_" 2>/dev/nu
     test_cmd="$(kodo_toml_get "$REPO_TOML" "dev" "test_command")"
     if [[ -n "$test_cmd" && "$test_cmd" != "echo no-tests" ]]; then
         # Install dependencies (required for test execution)
+        _hb
         kodo_log "DEV: installing dependencies in $work_dir"
         (cd "$work_dir" && npm install --frozen-lockfile 2>/dev/null || pnpm install --frozen-lockfile 2>/dev/null || yarn install --frozen-lockfile 2>/dev/null) >/dev/null 2>&1
 
+        _hb
         kodo_log "DEV: running tests: $test_cmd"
         local test_output
         test_output=$(cd "$work_dir" && timeout 120 bash -c "$test_cmd" 2>&1) || {
@@ -436,10 +443,12 @@ Fix the failing tests. Do NOT change production code — only fix the test files
                 defer "generated code fails tests after retry"
                 return
             fi
+            _hb
             kodo_log "DEV: tests pass after fix retry"
         }
     fi
 
+    _hb
     # Step 6: Commit the changes
     local git_stderr
     git_stderr=$(mktemp); _KODO_TMPFILES+=("$git_stderr")
@@ -462,6 +471,7 @@ COMMITMSG
     }
     rm -f "$git_stderr"
 
+    _hb
     # Step 7: Push branch + create PR (shadow mode blocks via kodo-git.sh)
     local push_stderr
     push_stderr=$(mktemp); _KODO_TMPFILES+=("$push_stderr")
@@ -626,6 +636,7 @@ do_hard_gates() {
 # ── PR Feedback Loop ─────────────────────────────────────────
 
 do_awaiting_feedback() {
+    _hb() { kodo_heartbeat "$EVENT_ID" "dev"; }
     kodo_log "DEV: awaiting feedback for $EVENT_ID"
 
     local pr_num
@@ -836,6 +847,7 @@ $feedback_text")"
 }
 
 do_applying_suggestions() {
+    _hb() { kodo_heartbeat "$EVENT_ID" "dev"; }
     kodo_log "DEV: applying bot suggestions for $EVENT_ID"
 
     local pr_num
@@ -925,6 +937,8 @@ do_applying_suggestions() {
 # ── Auditing & Scanning ─────────────────────────────────────
 
 do_auditing() {
+    _hb() { kodo_heartbeat "$EVENT_ID" "dev"; }
+    _hb
     kodo_log "DEV: auditing $EVENT_ID"
 
     local payload pr_num
@@ -1035,6 +1049,7 @@ _Event: ${EVENT_ID}_"
 }
 
 do_scanning() {
+    _hb() { kodo_heartbeat "$EVENT_ID" "dev"; }; _hb
     kodo_log "DEV: security scanning $EVENT_ID"
 
     # Read adaptive thresholds from DB
@@ -1118,6 +1133,7 @@ do_scanning() {
 }
 
 do_balloting() {
+    _hb() { kodo_heartbeat "$EVENT_ID" "dev"; }; _hb
     kodo_log "DEV: balloting $EVENT_ID (2/3 consensus required)"
 
     local votes=0
