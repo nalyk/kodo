@@ -362,6 +362,53 @@ _Automated analysis by KŌDŌ | Event: $EVENT_ID | Model: ${gen_cli}_" 2>/dev/nu
     kodo_pipeline_set "$EVENT_ID" "dev" "gen_files" "$changed_files"
     kodo_pipeline_set "$EVENT_ID" "dev" "gen_cli" "$gen_cli"
 
+    # Step 5b: Install deps + run tests BEFORE committing
+    # If tests fail, give the LLM one chance to fix
+    local test_cmd
+    test_cmd="$(kodo_toml_get "$REPO_TOML" "dev" "test_command")"
+    if [[ -n "$test_cmd" && "$test_cmd" != "echo no-tests" ]]; then
+        # Install dependencies (required for test execution)
+        kodo_log "DEV: installing dependencies in $work_dir"
+        (cd "$work_dir" && npm install --frozen-lockfile 2>/dev/null || pnpm install --frozen-lockfile 2>/dev/null || yarn install --frozen-lockfile 2>/dev/null) >/dev/null 2>&1
+
+        kodo_log "DEV: running tests: $test_cmd"
+        local test_output
+        test_output=$(cd "$work_dir" && timeout 120 bash -c "$test_cmd" 2>&1) || {
+            local test_exit=$?
+            kodo_log "DEV: tests failed (exit=$test_exit) — giving $gen_cli one chance to fix"
+
+            # Extract last 50 lines of test output as error context
+            local test_error
+            test_error=$(echo "$test_output" | tail -50)
+
+            local fix_prompt="The code you generated for issue #$issue_num has test failures.
+
+Test command: $test_cmd
+Test output (last 50 lines):
+$test_error
+
+Fix the failing tests. Do NOT change production code — only fix the test files. Make minimal changes."
+
+            if [[ "$gen_cli" == "codex" ]]; then
+                (cd "$work_dir" && timeout 300 codex exec "$fix_prompt" </dev/null 2>/dev/null) || true
+            elif [[ "$gen_cli" == "claude" ]]; then
+                (cd "$work_dir" && timeout 300 claude -p "$fix_prompt" \
+                    --output-format json --max-turns 10 \
+                    --allowedTools "Read" "Write" "Edit" "Glob" "Grep" "Bash(git diff:*)" "Bash(ls:*)" \
+                    </dev/null 2>/dev/null) || true
+            fi
+
+            # Re-run tests after fix attempt
+            if ! (cd "$work_dir" && timeout 120 bash -c "$test_cmd") >/dev/null 2>&1; then
+                kodo_log "DEV: tests still fail after retry — deferring"
+                "$SCRIPT_DIR/kodo-git.sh" cleanup-workdir "$work_dir" 2>/dev/null
+                defer "generated code fails tests after retry"
+                return
+            fi
+            kodo_log "DEV: tests pass after fix retry"
+        }
+    fi
+
     # Step 6: Commit the changes
     local git_stderr
     git_stderr=$(mktemp); _KODO_TMPFILES+=("$git_stderr")
