@@ -42,10 +42,10 @@ Classification is bash `case` statements. No LLM decides what goes where.
 
 | Model | What it does | What it costs |
 |-------|-------------|---------------|
-| Claude | Reviews code, scores confidence, writes PM reports | $200/mo |
-| Codex | Generates fixes, writes regression tests | $20/mo |
-| Gemini | Writes all the content (changelogs, welcomes, docs) | $0 |
-| Qwen | Triages every issue, grooms the backlog daily | $0 |
+| Claude | Analyzes codebase, creates implementation plans, reviews code, scores confidence, PM reports | $200/mo |
+| Codex | Executes implementation plans (primary code builder) | $20/mo |
+| Qwen | Executes plans (fallback builder), triages issues, classifies PR feedback | $0 |
+| Gemini | Executes plans (fallback builder), writes content (changelogs, welcomes) | $0 |
 
 The expensive model thinks. The free models work. Total: **$220/mo** for 3-5 active repos.
 

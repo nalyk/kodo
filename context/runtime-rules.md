@@ -99,10 +99,13 @@ Both paths produce validated JSON through the unified LLM abstraction layer.
 Budget limits are hard-enforced inside `kodo_invoke_llm()`. Every LLM call checks
 monthly spend before invoking. Exceeding the limit is structurally impossible.
 
-- Claude: **$200/month** hard cap — strategy, reviews, quality checks only
-- Codex: **$20/month** hard cap — code generation only
-- Gemini: free (1K RPD) — bulk content, changelogs, welcomes
-- Qwen: free (1K RPD) — triage, gardening, maintenance
+- Claude: **$200/month** hard cap — strategy, review, codebase analysis (Phase A). NEVER generates code.
+- Codex: **$20/month** hard cap — code execution (Phase B primary, `--full-auto`)
+- Qwen: free (1K RPD) — code execution fallback (`--approval-mode yolo`), triage, feedback classification
+- Gemini: free (1K RPD) — code execution fallback (`--yolo`), content, changelogs
+
+**Two-Phase Code Gen**: Claude reads codebase + produces implementation plan (Phase A, read-only).
+Codex → Qwen → Gemini tries each as builder (Phase B). Tests run before commit. Up to 3 retries on test failure.
 
 Telegram alert fires at 80% threshold (once per day). Hard block at 100%.
 **The expensive model does strategy. The free models do volume.**

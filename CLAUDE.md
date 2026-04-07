@@ -138,10 +138,14 @@ Free-tier CLIs (Gemini, Qwen) bypass the check. You cannot exceed budget — the
 
 | CLI | Command | Role | Budget |
 |-----|---------|------|--------|
-| Claude (you) | `claude -p` | Strategy, review, quality | $200/mo |
-| Codex | `codex exec` | Code generation | $20/mo |
-| Gemini | `gemini -p` | Bulk content, changelogs, welcomes | Free |
-| Qwen | `qwen -p` | Triage, gardening, maintenance | Free |
+| Claude (you) | `claude -p` | Strategy, review, analysis (Phase A architect) | $200/mo |
+| Codex | `codex exec --full-auto` | Code generation (Phase B primary) | $20/mo |
+| Qwen | `qwen -p --approval-mode yolo` | Code gen fallback, triage, feedback classification | Free |
+| Gemini | `gemini -p --yolo` | Code gen fallback, content, changelogs | Free |
+
+**Two-Phase Code Generation**: Claude analyzes issue + codebase (read-only, ~$0.30) → produces
+detailed implementation plan → Codex/Qwen/Gemini executes plan (tries each until one produces changes).
+Claude NEVER writes code. Claude is the architect. Free-tier CLIs are the builders.
 
 ### Fallback Chain (when you're down)
 
