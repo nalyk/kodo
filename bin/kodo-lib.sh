@@ -16,10 +16,16 @@ kodo_init_db() {
         mkdir -p "$(dirname "$KODO_DB")"
         sqlite3 "$KODO_DB" < "$KODO_HOME/sql/schema.sql"
     fi
-    local pragma_out
-    pragma_out=$(sqlite3 "$KODO_DB" "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;" 2>&1) || {
-        kodo_log "WARNING: DB pragma failed: $pragma_out"
-    }
+    # Set busy_timeout FIRST (no lock needed), then check WAL mode
+    # WAL requires exclusive lock — skip if already active to avoid contention
+    local current_mode
+    current_mode=$(sqlite3 -cmd ".timeout 5000" "$KODO_DB" "PRAGMA journal_mode;" 2>/dev/null) || current_mode=""
+    if [[ "$current_mode" != "wal" ]]; then
+        local wal_out
+        wal_out=$(sqlite3 -cmd ".timeout 5000" "$KODO_DB" "PRAGMA journal_mode=WAL;" 2>&1) || {
+            kodo_log "WARNING: WAL activation failed: $wal_out"
+        }
+    fi
 }
 
 # SQLite wrapper with busy timeout (5s wait on lock instead of instant fail)
