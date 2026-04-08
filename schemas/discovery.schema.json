@@ -12,6 +12,24 @@
     "lint_command": { "type": "string", "description": "Command to run linter" },
     "branch_default": { "type": "string", "description": "Default branch name" },
     "branch_protection": { "type": "boolean", "description": "Whether branch protection is enabled" },
+    "package_manager": {
+      "type": "string",
+      "enum": ["npm", "yarn", "pnpm", "bun", "pip", "poetry", "uv", "cargo", "go", "bundler", "composer", "mix", "unknown"],
+      "description": "Detected package manager"
+    },
+    "ci_workflows": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of CI workflow file paths detected"
+    },
+    "languages": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "All languages detected in the repository"
+    },
+    "has_readme": { "type": "boolean", "description": "Whether README.md exists" },
+    "has_architecture_doc": { "type": "boolean", "description": "Whether ARCHITECTURE.md or similar exists" },
+    "has_contributing": { "type": "boolean", "description": "Whether CONTRIBUTING.md exists" },
     "labels": {
       "type": "array",
       "items": { "type": "string" },
