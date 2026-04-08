@@ -55,6 +55,20 @@ A wrong auto-merge causes a revert. A false defer causes a delay. Prefer the del
 
 ---
 
+## Anti-Self-Grading Policy
+
+KODO-generated PRs (where the implementation plan came from Claude in Phase A)
+are reviewed and balloted by non-Claude models. The reviewer is Codex (preferred)
+or Gemini. The ballot voter pool is Codex + Gemini + Qwen (Claude excluded).
+Human-authored PRs are reviewed and balloted by the default pool (Claude as
+primary reviewer, Claude + Gemini + Qwen as voters).
+
+Rationale: Claude as architect has prior commitment to its own plan. Asking Claude
+to score the diff or vote on the merge creates a closed self-grading loop. Splitting
+architect from reviewer converts the ballot into actual cross-model verification.
+
+---
+
 ## State Machine Rules
 
 Every pipeline event follows a deterministic state machine per domain.
