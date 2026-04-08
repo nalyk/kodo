@@ -314,6 +314,101 @@ _gh_pr_apply_suggestion() {
     )
 }
 
+# ── Post-Merge Monitoring ───────────────────────────────────
+
+# Get the merge commit SHA for a merged PR
+_gh_pr_merge_sha() {
+    local slug="$1" pr_num="$2"
+    gh pr view "$pr_num" --repo "$slug" --json mergeCommit --jq '.mergeCommit.oid' 2>/dev/null
+}
+
+# Check CI status for a specific commit on the default branch
+# Returns JSON: {state, pass, fail, pending, total}
+_gh_commit_checks() {
+    local slug="$1" sha="$2"
+    local raw
+    raw=$(gh api "repos/${slug}/commits/${sha}/check-runs" --jq '[.check_runs[] | {name, status, conclusion}]' 2>&1) || {
+        kodo_log "ERROR: commit-checks failed for $slug $sha: ${raw:0:200}"
+        return 1
+    }
+    echo "$raw" | jq -c '{
+        total: length,
+        pass: [.[] | select(.conclusion == "success")] | length,
+        fail: [.[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out")] | length,
+        pending: [.[] | select(.status != "completed")] | length,
+        state: (
+            if length == 0 then "NO_CHECKS"
+            elif ([.[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out")] | length) > 0 then "FAILURE"
+            elif ([.[] | select(.status != "completed")] | length) > 0 then "PENDING"
+            else "SUCCESS"
+            end
+        )
+    }'
+}
+
+# Create and merge a revert PR for a merge commit
+# Uses manual git-revert flow (gh has no native pr-revert)
+_gh_pr_revert() {
+    local slug="$1" merge_sha="$2" event_id="${3:-}" pr_title="${4:-}"
+    local branch_name="kodo/dev/revert-${event_id:-${merge_sha:0:12}}"
+    local work_dir
+
+    work_dir=$(_gh_repo_clone "$slug") || {
+        kodo_log "ERROR: failed to clone $slug for revert"
+        return 1
+    }
+
+    (
+        cd "$work_dir" || return 1
+        git revert "$merge_sha" --no-edit 2>/dev/null || {
+            kodo_log "ERROR: git revert $merge_sha failed — likely conflict"
+            return 1
+        }
+        git checkout -b "$branch_name"
+    ) || {
+        rm -rf "$work_dir"
+        return 1
+    }
+
+    _gh_branch_push "$work_dir" "$branch_name" 2>/dev/null || {
+        rm -rf "$work_dir"
+        return 1
+    }
+
+    local revert_title="[kodo-dev] Revert: ${pr_title:-merge $merge_sha}"
+    local revert_body
+    revert_body="Automated revert by KŌDŌ post-merge monitoring.
+
+**Reason:** CI regression detected after merge.
+**Original merge SHA:** \`${merge_sha}\`
+**Event ID:** \`${event_id}\`
+
+This revert was triggered because main-branch CI checks failed within the monitoring window."
+
+    local pr_url
+    pr_url=$(_gh_pr_create "$slug" "$branch_name" "$revert_title" "$revert_body" 2>/dev/null) || {
+        rm -rf "$work_dir"
+        return 1
+    }
+
+    # Extract PR number from URL
+    local revert_pr_num
+    revert_pr_num=$(echo "$pr_url" | grep -oE '[0-9]+$')
+
+    # Wait for CI to start before merging the revert
+    sleep 60
+
+    _gh_pr_merge "$slug" "$revert_pr_num" 2>/dev/null || {
+        kodo_log "ERROR: failed to merge revert PR #$revert_pr_num"
+        rm -rf "$work_dir"
+        return 1
+    }
+
+    rm -rf "$work_dir"
+    kodo_log "REVERT: merged revert PR #$revert_pr_num for $slug ($merge_sha)"
+    return 0
+}
+
 # ── Gitea / Bitbucket stubs ──────────────────────────────────
 
 _stub_not_supported() {
@@ -362,7 +457,7 @@ main() {
     shift 2
 
     # Write actions require shadow mode check
-    local write_actions="pr-comment pr-merge pr-create branch-push issue-comment issue-close issue-label issue-create release-edit discussion-create pr-apply-suggestion pr-rebase"
+    local write_actions="pr-comment pr-merge pr-create branch-push issue-comment issue-close issue-label issue-create release-edit discussion-create pr-apply-suggestion pr-rebase pr-revert"
     if [[ " $write_actions " == *" $action "* ]]; then
         _guard_write "$toml" "$action" || return $?
     fi
@@ -397,6 +492,9 @@ main() {
                 pr-reviews)         _gh_pr_reviews "$slug" "$@" ;;
                 pr-review-comments) _gh_pr_review_comments "$slug" "$@" ;;
                 pr-apply-suggestion) _gh_pr_apply_suggestion "$@" ;;
+                pr-merge-sha)       _gh_pr_merge_sha "$slug" "$@" ;;
+                commit-checks)      _gh_commit_checks "$slug" "$@" ;;
+                pr-revert)          _gh_pr_revert "$slug" "$@" ;;
                 *) kodo_log "ERROR: unknown action '$action'"; exit 1 ;;
             esac
             ;;

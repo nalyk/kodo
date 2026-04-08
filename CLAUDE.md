@@ -77,16 +77,17 @@ feed the transition decisions made by engine scripts.
 ### Dev Domain
 ```
 [*] → pending → triaging ─┬─► generating → hard_gates ─┬─► awaiting_feedback → applying_suggestions → hard_gates (loop)
-                           ├─► auditing (PRs)            ├─► auditing → scanning ─┬─► auto_merge → releasing → resolved
-                           ├─► hard_gates (deps)         │                         ├─► balloting → guarded_merge → releasing
-                           └─► deferred                  └─► auto_merge (deps)     └─► deferred (retry max 2) → closed
-
+                           ├─► auditing (PRs)            ├─► auditing → scanning ─┬─► auto_merge → releasing → monitoring ─┬─► resolved (clean window)
+                           ├─► hard_gates (deps)         │                         ├─► balloting → guarded_merge → releasing │
+                           └─► deferred                  └─► auto_merge (deps)     └─► deferred (retry max 2) → closed      ├─► reverting → resolved (auto-reverted)
+                                                                                                                             └─► reverting → deferred (revert failed, human needed)
                            Rebase loop: auto_merge/guarded_merge → hard_gates (on BEHIND/conflict)
 ```
 Note: Engine loops through all states in one invocation. CI status is checked before every merge.
 Concurrent processing is PID-locked — two engines cannot process the same event simultaneously.
 Bot feedback (Gemini Code Assist, CodeRabbit) is awaited for KODO-generated PRs before auditing.
 Server-side rebase is attempted when branch is behind base — loops back through hard_gates for re-verification.
+Post-merge monitoring polls main-branch CI for the merge commit on a 15-minute cadence (configurable via `monitoring_window_hours`, default 48). CI failure triggers automatic revert PR. Failed reverts alert the operator via Telegram.
 
 ### Marketing Domain
 ```
@@ -124,7 +125,7 @@ No preamble, no explanation, no markdown wrapping. Just the JSON object.
 4. **Layer 2.5** — Security scan (semgrep on checked-out PR branch, confidence penalty for findings)
 5. **Layer 3** — Balloting (you + Gemini + Qwen vote in parallel, 2/3 consensus for medium confidence)
 6. **Pre-merge** — Mergeability check + auto-rebase if BEHIND base, CI status check: green required, pending = yield, red = defer
-7. **Post-merge** — 48h rollback window
+7. **Post-merge** — Monitoring window (default 48h, configurable via `monitoring_window_hours`). Polls main-branch CI for the merge commit every 15 minutes. CI failure triggers automatic revert PR. Failed reverts alert the operator via Telegram and defer for manual intervention.
 
 ## Budget Enforcement
 

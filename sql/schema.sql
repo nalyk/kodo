@@ -120,3 +120,6 @@ CREATE INDEX IF NOT EXISTS idx_budget_repo ON budget_ledger(repo);
 CREATE INDEX IF NOT EXISTS idx_merge_repo ON merge_outcomes(repo, merged_at);
 CREATE INDEX IF NOT EXISTS idx_deferred_domain ON deferred_queue(domain);
 CREATE INDEX IF NOT EXISTS idx_pr_feedback_event ON pr_feedback(event_id);
+CREATE INDEX IF NOT EXISTS idx_pipeline_monitoring
+    ON pipeline_state(state, updated_at)
+    WHERE state = 'monitoring';
