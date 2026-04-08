@@ -93,6 +93,17 @@ INSERT OR IGNORE INTO confidence_bands (band, threshold) VALUES
     ('ballot', 50),
     ('defer', 0);
 
+CREATE TABLE IF NOT EXISTS calibration_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    band            TEXT NOT NULL,
+    old_threshold   INTEGER NOT NULL,
+    new_threshold   INTEGER NOT NULL,
+    incident_rate   REAL NOT NULL,
+    sample_size     INTEGER NOT NULL,
+    reason          TEXT NOT NULL DEFAULT '',
+    calibrated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS pr_feedback (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id          TEXT NOT NULL,

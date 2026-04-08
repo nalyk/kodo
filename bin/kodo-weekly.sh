@@ -203,9 +203,135 @@ Health: $([ "$health_status" -eq 0 ] && echo "ALL CLEAR" || echo "$health_status
     kodo_send_telegram "$msg"
 }
 
+# ── Confidence Band Calibration ─────────────────────────────
+
+calibrate_confidence_bands() {
+    kodo_log "CALIBRATION: starting confidence band calibration"
+
+    # Read current thresholds
+    local auto_merge_threshold ballot_threshold
+    auto_merge_threshold=$(kodo_sql "SELECT threshold FROM confidence_bands WHERE band = 'auto_merge';")
+    ballot_threshold=$(kodo_sql "SELECT threshold FROM confidence_bands WHERE band = 'ballot';")
+
+    # Fallback to defaults if missing
+    auto_merge_threshold="${auto_merge_threshold:-90}"
+    ballot_threshold="${ballot_threshold:-50}"
+
+    # Validate thresholds are integers
+    if ! [[ "$auto_merge_threshold" =~ ^[0-9]+$ ]] || ! [[ "$ballot_threshold" =~ ^[0-9]+$ ]]; then
+        kodo_log "CALIBRATION: invalid thresholds (auto_merge=${auto_merge_threshold}, ballot=${ballot_threshold}), aborting"
+        return 1
+    fi
+
+    # Query 30-day outcomes bucketed by current thresholds
+    local high_total high_incidents med_total med_incidents
+    high_total=$(kodo_sql "SELECT COUNT(*) FROM merge_outcomes
+        WHERE merged_at > datetime('now', '-30 days')
+        AND confidence >= ${auto_merge_threshold};")
+    high_incidents=$(kodo_sql "SELECT COUNT(*) FROM merge_outcomes
+        WHERE merged_at > datetime('now', '-30 days')
+        AND confidence >= ${auto_merge_threshold}
+        AND outcome IN ('reverted', 'hotfixed');")
+    med_total=$(kodo_sql "SELECT COUNT(*) FROM merge_outcomes
+        WHERE merged_at > datetime('now', '-30 days')
+        AND confidence >= ${ballot_threshold}
+        AND confidence < ${auto_merge_threshold};")
+    med_incidents=$(kodo_sql "SELECT COUNT(*) FROM merge_outcomes
+        WHERE merged_at > datetime('now', '-30 days')
+        AND confidence >= ${ballot_threshold}
+        AND confidence < ${auto_merge_threshold}
+        AND outcome IN ('reverted', 'hotfixed');")
+
+    local changes_made=0
+
+    # --- High band: target ≤ 2%, range [85, 95] ---
+    _calibrate_band "auto_merge" "$auto_merge_threshold" "$high_total" "$high_incidents" \
+        0.02 85 95 && changes_made=1
+
+    # --- Medium band: target ≤ 10%, range [40, 60] ---
+    _calibrate_band "ballot" "$ballot_threshold" "$med_total" "$med_incidents" \
+        0.10 40 60 && changes_made=1
+
+    if [[ "$changes_made" -eq 0 ]]; then
+        kodo_log "CALIBRATION: no threshold changes this cycle"
+    fi
+
+    kodo_log "CALIBRATION: complete"
+}
+
+# Calibrate a single band. Returns 0 if threshold changed, 1 otherwise.
+# Usage: _calibrate_band <band> <threshold> <total> <incidents> <target_rate> <min> <max>
+_calibrate_band() {
+    local band="$1" threshold="$2" total="$3" incidents="$4"
+    local target_rate="$5" bound_min="$6" bound_max="$7"
+
+    if [[ "$total" -lt 20 ]]; then
+        kodo_log "CALIBRATION: ${band} band insufficient data (n=${total}), skipping"
+        return 1
+    fi
+
+    local rate pct
+    rate=$(awk "BEGIN { printf \"%.4f\", ${incidents} / ${total} }")
+    pct=$(awk "BEGIN { printf \"%.1f\", ${incidents} * 100.0 / ${total} }")
+    local target_pct
+    target_pct=$(awk "BEGIN { printf \"%.0f\", ${target_rate} * 100 }")
+    local half_target
+    half_target=$(awk "BEGIN { printf \"%.4f\", ${target_rate} / 2 }")
+    local half_pct
+    half_pct=$(awk "BEGIN { printf \"%.0f\", ${target_rate} * 50 }")
+
+    local new_threshold="$threshold"
+
+    # Rate exceeds target → raise threshold by 2
+    if awk "BEGIN { exit (${rate} > ${target_rate}) ? 0 : 1 }" 2>/dev/null; then
+        new_threshold=$(( threshold + 2 ))
+        [[ "$new_threshold" -gt "$bound_max" ]] && new_threshold="$bound_max"
+        if [[ "$new_threshold" -ne "$threshold" ]]; then
+            kodo_log "CALIBRATION: ${band} band incident rate ${pct}% > ${target_pct}%, raising threshold ${threshold} → ${new_threshold}"
+            kodo_send_telegram "KŌDŌ Calibration: ${band} band incident rate ${pct}% > ${target_pct}% target. Threshold ${threshold} → ${new_threshold} (n=${total})"
+            kodo_sql "INSERT INTO calibration_history (band, old_threshold, new_threshold, incident_rate, sample_size, reason)
+                VALUES ('$(kodo_sql_escape "$band")', ${threshold}, ${new_threshold}, ${rate}, ${total},
+                'incident rate ${pct}% exceeds ${target_pct}% target');"
+            kodo_sql "UPDATE confidence_bands SET threshold = ${new_threshold}, incident_rate_30d = ${rate}, updated_at = datetime('now')
+                WHERE band = '$(kodo_sql_escape "$band")';"
+            return 0
+        else
+            kodo_log "CALIBRATION: ${band} band incident rate ${pct}% > ${target_pct}% but threshold already at bound (${threshold})"
+        fi
+    # Rate below half target → lower threshold by 1
+    elif awk "BEGIN { exit (${rate} < ${half_target}) ? 0 : 1 }" 2>/dev/null; then
+        if [[ "$threshold" -gt "$bound_min" ]]; then
+            new_threshold=$(( threshold - 1 ))
+            [[ "$new_threshold" -lt "$bound_min" ]] && new_threshold="$bound_min"
+            kodo_log "CALIBRATION: ${band} band incident rate ${pct}% < ${half_pct}%, lowering threshold ${threshold} → ${new_threshold}"
+            kodo_sql "INSERT INTO calibration_history (band, old_threshold, new_threshold, incident_rate, sample_size, reason)
+                VALUES ('$(kodo_sql_escape "$band")', ${threshold}, ${new_threshold}, ${rate}, ${total},
+                'incident rate ${pct}% below ${half_pct}% floor');"
+            kodo_sql "UPDATE confidence_bands SET threshold = ${new_threshold}, incident_rate_30d = ${rate}, updated_at = datetime('now')
+                WHERE band = '$(kodo_sql_escape "$band")';"
+            return 0
+        else
+            kodo_log "CALIBRATION: ${band} band incident rate ${pct}% < ${half_pct}% but threshold already at bound (${threshold})"
+        fi
+    else
+        kodo_log "CALIBRATION: ${band} band incident rate ${pct}% within target (n=${total}), no change"
+    fi
+
+    # No change — still update the observed rate
+    kodo_sql "UPDATE confidence_bands SET incident_rate_30d = ${rate}, updated_at = datetime('now')
+        WHERE band = '$(kodo_sql_escape "$band")';"
+    return 1
+}
+
 # ── Main ─────────────────────────────────────────────────────
 
 main() {
+    # Support isolated calibration for testing
+    if [[ "${1:-}" == "--calibrate-only" ]]; then
+        calibrate_confidence_bands
+        return
+    fi
+
     kodo_log "WEEKLY: starting weekly cycle"
 
     # 1. Self-health check
@@ -218,7 +344,10 @@ main() {
     # 3. PM weekly reports
     run_pm_weekly
 
-    # 4. Weekly summary to Telegram
+    # 4. Calibrate confidence bands from merge outcome data
+    calibrate_confidence_bands
+
+    # 5. Weekly summary to Telegram
     send_weekly_summary "$health_status"
 
     kodo_log "WEEKLY: cycle complete"

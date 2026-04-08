@@ -66,7 +66,13 @@ When reviewing code, score honestly:
 **Calibration rule**: If you'd hesitate to merge this yourself, score below 90.
 A wrong auto-merge causes a revert. A false defer causes a delay. Prefer the delay.
 
-Bands are **adaptive**: 30-day rolling window adjusts thresholds automatically.
+Bands are **adaptive**: `kodo-weekly.sh` calibrates thresholds every Monday using 30-day
+merge outcome data from `merge_outcomes` (populated by post-merge monitoring). After ≥20
+merges in a band, the observed incident rate (reverted + hotfixed / total) is compared
+against targets: ≤2% for auto_merge, ≤10% for ballot. Thresholds adjust by +2 when the
+rate exceeds the target, or -1 when below half the target. Ranges are bounded:
+auto_merge [85, 95], ballot [40, 60]. Changes are logged to `calibration_history` and
+alerted via Telegram.
 
 ---
 
@@ -235,7 +241,7 @@ cron (4 entries)
 | IssueCommentEvent (technical) | DEV |
 
 ### Database Tables
-`pipeline_state` · `pending_events` · `community_log` · `pm_artifacts` · `budget_ledger` · `repo_metrics` · `merge_outcomes` · `deferred_queue` · `confidence_bands` · `pr_feedback`
+`pipeline_state` · `pending_events` · `community_log` · `pm_artifacts` · `budget_ledger` · `repo_metrics` · `merge_outcomes` · `deferred_queue` · `confidence_bands` · `calibration_history` · `pr_feedback`
 
 Key columns in `pipeline_state`: `payload_json` (event data from GitHub), `metadata_json` (inter-state data: confidence, model, ballot results, CI state, feedback delta, rebase count), `processing_pid` (concurrent processing lock).
 

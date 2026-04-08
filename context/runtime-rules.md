@@ -53,6 +53,12 @@ When reviewing code, score honestly:
 **Calibration rule**: If you'd hesitate to merge this yourself, score below 90.
 A wrong auto-merge causes a revert. A false defer causes a delay. Prefer the delay.
 
+**Self-calibration**: Thresholds adjust weekly based on 30-day merge outcomes. After ≥20
+merges per band, incident rate (reverted + hotfixed / total) is compared against targets:
+≤2% for auto_merge, ≤10% for ballot. Threshold moves: +2 when rate exceeds target, -1 when
+below half target. Bounded ranges: auto_merge [85, 95], ballot [40, 60]. Changes logged to
+`calibration_history` and alerted via Telegram. The current thresholds are in `confidence_bands`.
+
 ---
 
 ## Anti-Self-Grading Policy

@@ -125,7 +125,7 @@ Plus your git provider CLI: `gh` or `glab`
 
 Working implementation. Full-cycle tested against `yoda-digital/iris-gateway` — Scout through resolved, all three engines, all state paths. Shadow mode verified. Dependabot auto-merge path: pending to resolved in under 1 second.
 
-The confidence bands self-calibrate over time. Start conservative. Let the data tell you when to trust it.
+Confidence bands self-calibrate weekly. After ≥20 merges per band, KŌDŌ compares observed incident rates against targets (≤2% for auto-merge, ≤10% for ballot) and adjusts thresholds within bounded ranges ([85,95] and [40,60]). Threshold changes alert the operator via Telegram. Start conservative. Let the data tell you when to trust it.
 
 ---
 
