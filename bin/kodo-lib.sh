@@ -213,6 +213,49 @@ kodo_sql_escape() {
     echo "${1//\'/\'\'}"
 }
 
+# ── User Content Sanitization ───────────────────────────────
+# Sanitize untrusted user-derived content (issue bodies, PR descriptions,
+# comments) before embedding into LLM prompts. Defense against indirect
+# prompt injection through issue tracker content.
+#
+# Usage: sanitized=$(kodo_sanitize_user_content "$raw_input" [max_chars])
+# Side effect: sets KODO_LAST_USER_HASH to SHA256 of the ORIGINAL input.
+# Temp file for passing hash out of subshell ($(…) can't set parent globals)
+KODO_SANITIZE_HASH_FILE="${TMPDIR:-/tmp}/.kodo_sanitize_hash.$$"
+kodo_sanitize_user_content() {
+    local input="${1:-}"
+    local max_chars="${2:-4000}"
+
+    # Compute hash of original content BEFORE any sanitization
+    # Written to temp file because $(…) runs in a subshell
+    printf '%s' "$input" | sha256sum | cut -d' ' -f1 > "$KODO_SANITIZE_HASH_FILE"
+
+    # Strip null bytes
+    local result
+    result=$(printf '%s' "$input" | tr -d '\0')
+
+    # Strip ANSI escape sequences
+    result=$(printf '%s' "$result" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')
+
+    # Replace lines that match our prompt boundary delimiters
+    # Prevents attacker from closing/opening our delimiter blocks
+    result=$(printf '%s' "$result" | sed -E \
+        -e 's/^[[:space:]]*(BEGIN_ISSUE|END_ISSUE|BEGIN_PLAN|END_PLAN)[[:space:]]*$/[SANITIZED_DELIMITER]/g' \
+        -e 's/^---[A-Z_]*---$/[SANITIZED_DELIMITER]/g')
+
+    # Truncate to max length
+    if [[ ${#result} -gt $max_chars ]]; then
+        result="${result:0:$max_chars}"
+    fi
+
+    printf '%s' "$result"
+}
+
+# Read hash stored by the last kodo_sanitize_user_content call
+kodo_last_user_hash() {
+    cat "$KODO_SANITIZE_HASH_FILE" 2>/dev/null
+}
+
 # Load shared runtime rules for injection into LLM prompts
 # Usage: local ctx; ctx="$(kodo_runtime_context)"
 #        prompt="$ctx\n\nYour specific task: ..."

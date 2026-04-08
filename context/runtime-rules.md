@@ -130,6 +130,38 @@ since comments cannot be posted.
 
 ---
 
+## Prompt Injection Defense
+
+Issue bodies, titles, and comments are untrusted user data that flows through Claude (Phase A
+architect) into executor CLIs (Phase B: Codex/Qwen/Gemini running with auto-approve). This
+creates an indirect prompt injection surface. Defenses:
+
+1. **Sanitization**: All user-derived content is sanitized via `kodo_sanitize_user_content()`
+   before reaching any LLM. Sanitization strips null bytes, ANSI escape sequences, and lines
+   that match prompt boundary delimiters. Content is truncated to safe limits (title: 200,
+   body: 4000, comments: 2000 chars).
+
+2. **Delimited framing**: User content is wrapped in `BEGIN_ISSUE` / `END_ISSUE` markers in
+   the Phase A analysis prompt and the Phase B fallback prompt. The implementation plan is
+   wrapped in `BEGIN_PLAN` / `END_PLAN` in the Phase B executor prompt. Each prompt includes
+   explicit anti-injection instructions telling the model to ignore any commands inside the
+   delimited blocks.
+
+3. **Plan validation**: Before passing Claude's plan to executor CLIs, the plan is checked for:
+   - `INJECTION_DETECTED` marker (Claude's explicit refusal signal)
+   - Suspicious shell/exfiltration patterns: `curl`, `wget`, `nc`, `bash -c`, `eval`,
+     `rm -rf`, `gh secret`, `gh auth`, credential `export` commands
+   Either match defers the event and alerts the operator via Telegram.
+
+4. **Forensic trace**: SHA256 hash of the original (pre-sanitized) issue body is stored in
+   `pipeline_state.metadata_json` as `user_content_hash` for post-incident investigation.
+
+5. **Executor scope constraints**: The Phase B prompt explicitly restricts the executor to code
+   files in the working directory. Modifications to CI configs, deploy scripts, `.github/`,
+   `.gitlab/`, and secrets are out of scope.
+
+---
+
 ## Output Contracts
 
 When `--json-schema` is provided, your ENTIRE output must be valid JSON matching the schema.
