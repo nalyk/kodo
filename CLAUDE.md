@@ -38,6 +38,7 @@ Budget: $200/month. You are the expensive model — use wisely. Delegate bulk wo
 9. NEVER create cron entries beyond the 4 defined in `crontab.txt`
 10. NEVER auto-merge with confidence score below 90
 11. NEVER act on events from repos not registered in `repos/*.toml`
+12. NEVER write `echo no-tests` or similar placeholders into a repo TOML — leave the field empty and warn
 
 ### ALWAYS
 
@@ -120,6 +121,9 @@ No preamble, no explanation, no markdown wrapping. Just the JSON object.
 ## Quality Gates
 
 1. **Layer 1** — Hard gates (deterministic, no LLM): tests, lint, diff size, scope
+   - Empty/placeholder test/lint commands defer unless explicitly opted out via `tests_optional`/`lint_optional` (default: false)
+   - Missing CI refuses merge unless `allow_no_ci = true` in repo TOML (default: false)
+   - Dependencies are auto-installed before running test/lint gates on cloned PR branches
 2. **Layer 1.5** — Bot feedback loop: await reviews from trusted bots (Gemini Code Assist, CodeRabbit), auto-apply suggestions, adjust confidence
 3. **Layer 2** — LLM review (you: confidence scoring via confidence.schema.json, with feedback delta applied)
 4. **Layer 2.5** — Security scan (semgrep on checked-out PR branch, confidence penalty for findings)
