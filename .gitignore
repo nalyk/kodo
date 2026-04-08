@@ -6,6 +6,8 @@ repos/*.toml
 !repos/_template.toml
 *.voice.md
 *.kodo.md
+!repos/_template.kodo.md
+!repos/_template.voice.md
 .brain.lock
 .claude/CLAUDE.md
 telegram.conf
