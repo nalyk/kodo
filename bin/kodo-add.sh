@@ -58,7 +58,7 @@ enabled = true
 enabled = true
 EOF
 
-    local lang="unknown" branch="main" test_cmd="echo no-tests" lint_cmd="echo no-lint"
+    local lang="unknown" branch="main" test_cmd="" lint_cmd=""
 
     # Use Claude for auto-discovery if available
     if kodo_cli_available claude; then
@@ -92,8 +92,8 @@ Discover: language, CI system, test command, lint command, default branch, label
         if [[ -n "$discovery" ]]; then
             lang=$(echo "$discovery" | jq -r '.language // "unknown"' 2>/dev/null)
             branch=$(echo "$discovery" | jq -r '.branch_default // "main"' 2>/dev/null)
-            test_cmd=$(echo "$discovery" | jq -r '.test_command // "echo no-tests"' 2>/dev/null)
-            lint_cmd=$(echo "$discovery" | jq -r '.lint_command // "echo no-lint"' 2>/dev/null)
+            test_cmd=$(echo "$discovery" | jq -r '.test_command // ""' 2>/dev/null)
+            lint_cmd=$(echo "$discovery" | jq -r '.lint_command // ""' 2>/dev/null)
         fi
     else
         echo "Claude unavailable — using basic discovery..."
@@ -126,8 +126,11 @@ enabled = true
 
 [dev]
 enabled = true
-test_command = "${test_cmd:-echo no-tests}"
-lint_command = "${lint_cmd:-echo no-lint}"
+test_command = "$test_cmd"
+lint_command = "$lint_cmd"
+tests_optional = false
+lint_optional = false
+allow_no_ci = false
 max_diff_lines = 500
 auto_merge_deps = true
 semver_release = true
@@ -148,6 +151,15 @@ telegram_digest = false
 TOML
 
     echo "  Config written: $toml_path"
+
+    # Warn operator about missing gates so they take explicit action
+    if [[ -z "$test_cmd" ]]; then
+        echo "WARNING: no test command detected for $owner/$repo. Hard gates will defer all PRs until you set [dev] test_command in repos/${repo_id}.toml or explicitly opt out with [dev] tests_optional = true." >&2
+    fi
+    if [[ -z "$lint_cmd" ]]; then
+        echo "WARNING: no lint command detected for $owner/$repo. Hard gates will defer all PRs until you set [dev] lint_command in repos/${repo_id}.toml or explicitly opt out with [dev] lint_optional = true." >&2
+    fi
+    echo "NOTE: allow_no_ci defaults to false. If this repo has no CI, auto-merge will refuse until you configure CI or set [dev] allow_no_ci = true." >&2
 
     # ── Phase 3: Validate ───────────────────────────────────────
 

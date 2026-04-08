@@ -28,6 +28,7 @@ Claude (strategy/review), Codex (code generation), Gemini (content), Qwen (triag
 7. NEVER act on repos not registered in `repos/*.toml`
 8. NEVER parse free-text LLM output — ALL structured data uses `--json-schema`
 9. NEVER invoke CLI tools without `</dev/null` — cron has no stdin, CLI tools block without it
+10. NEVER write `echo no-tests` or similar placeholders into a repo TOML — leave the field empty and warn the operator
 
 ### ALWAYS
 
@@ -74,6 +75,21 @@ Concurrent processing is PID-locked — two engines cannot process the same even
 Invalid transitions are rejected. Deferred events retry max 2 times, then auto-close.
 Feedback rounds and rebase attempts are configurable per repo via TOML.
 Post-merge monitoring polls main-branch CI every 15 minutes for `monitoring_window_hours` (default 48). CI failure triggers automatic revert. Failed reverts alert operator via Telegram and defer.
+
+---
+
+## Hard Gate Safety Flags
+
+Three per-repo TOML flags control hard gate behavior. All default to `false` (safe by default).
+
+| Flag | Section | Default | Effect when `false` | Effect when `true` |
+|------|---------|---------|--------------------|--------------------|
+| `tests_optional` | `[dev]` | `false` | Defer if no real test command configured | Skip test gate silently |
+| `lint_optional` | `[dev]` | `false` | Defer if no real lint command configured | Skip lint gate silently |
+| `allow_no_ci` | `[dev]` | `false` | Refuse merge if repo has no CI checks | Allow merge without CI |
+
+Empty or placeholder test/lint commands (e.g., `echo no-tests`) are treated as "no real command".
+Repos onboarded without a detectable test command get an empty `test_command` and a stderr warning.
 
 ---
 

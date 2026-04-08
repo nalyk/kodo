@@ -11,8 +11,11 @@ enabled = true                          # Master switch: disable to stop all sca
 
 [dev]
 enabled = true                          # Enable dev engine
-test_command = "npm test"               # Command to run tests
-lint_command = "npm run lint"           # Command to run linter
+test_command = "npm test"               # Command to run tests (leave empty if none)
+lint_command = "npm run lint"           # Command to run linter (leave empty if none)
+tests_optional = false                  # true = skip test gate when no test command configured
+lint_optional = false                   # true = skip lint gate when no lint command configured
+allow_no_ci = false                     # true = allow merge when repo has no CI checks
 max_diff_lines = 500                    # Hard gate: max diff size
 auto_merge_deps = true                  # Auto-merge dependency updates if CI green
 semver_release = true                   # Auto-tag semver releases after merge
