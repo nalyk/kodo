@@ -177,9 +177,163 @@ _triage_issue() {
         return
     fi
 
-    # Bug/fix/test/enhancement → code generation
+    # Intent gate: require maintainer approval before generating code
+    local intent_gate
+    intent_gate=$(kodo_toml_bool "$REPO_TOML" "dev" "issue_intent_gate" && echo "true" || echo "false")
+    if [[ "$intent_gate" == "true" ]]; then
+        local intent_decision
+        intent_decision=$(kodo_pipeline_get "$EVENT_ID" "dev" "intent_decision")
+        if [[ "$intent_decision" == "approved" ]]; then
+            kodo_log "DEV: issue #$issue_num — intent approved, generating"
+            transition "triaging" "generating"
+            return
+        fi
+        if [[ "$intent_decision" == "denied" ]]; then
+            kodo_log "DEV: issue #$issue_num — intent denied"
+            defer "intent denied"
+            return
+        fi
+        kodo_log "DEV: issue #$issue_num — entering intent gate"
+        transition "triaging" "awaiting_intent"
+        return
+    fi
+
+    # Gate disabled (or field missing) — proceed to code generation
     kodo_log "DEV: issue #$issue_num — generating path (code fix)"
     transition "triaging" "generating"
+}
+
+do_awaiting_intent() {
+    kodo_log "DEV: awaiting_intent $EVENT_ID"
+    local payload
+    payload="$(get_payload)"
+    local issue_num
+    issue_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+
+    if [[ -z "$issue_num" ]]; then
+        defer "awaiting_intent but no issue number in payload"
+        return
+    fi
+
+    # Shadow mode: can't post comments, auto-approve so pipeline flows for inspection
+    if kodo_is_shadow "$REPO_TOML"; then
+        kodo_log "DEV: shadow mode — auto-approving intent gate for issue #$issue_num"
+        kodo_pipeline_set "$EVENT_ID" "dev" "intent_decision" "approved"
+        transition "awaiting_intent" "generating"
+        return
+    fi
+
+    local comment_id
+    comment_id=$(kodo_pipeline_get "$EVENT_ID" "dev" "intent_comment_id")
+
+    # Step 1: Post the intent comment if not yet posted
+    if [[ -z "$comment_id" || "$comment_id" == "null" ]]; then
+        local window_hours
+        window_hours=$(kodo_toml_get "$REPO_TOML" "dev" "intent_window_hours" 2>/dev/null)
+        [[ -z "$window_hours" ]] && window_hours=24
+
+        local body
+        body="<!-- kodo-intent-marker -->
+🤖 **KŌDŌ is considering automating this issue.**
+
+To approve automation, either:
+  - Add the \`kodo-go\` label, OR
+  - React with 👍 to this comment
+
+To skip, either:
+  - Add the \`kodo-skip\` label, OR
+  - React with 👎 to this comment
+
+Decision needed within ${window_hours}h, otherwise KŌDŌ will defer.
+
+What KŌDŌ will do if approved:
+  1. Read the issue and codebase
+  2. Generate a fix on a \`kodo/dev/${EVENT_ID}\` branch
+  3. Run tests, lint, security scan
+  4. Open a PR with the fix and a confidence score
+  5. Auto-merge only if confidence ≥ 90 AND CI passes"
+
+        local comment_url
+        comment_url=$("$SCRIPT_DIR/kodo-git.sh" issue-comment "$REPO_TOML" "$issue_num" "$body" 2>/dev/null) || {
+            defer "failed to post intent comment on issue #$issue_num"
+            return
+        }
+
+        # Extract comment ID from URL (format: ...#issuecomment-12345)
+        comment_id="${comment_url##*issuecomment-}"
+        if [[ -z "$comment_id" || "$comment_id" == "$comment_url" ]]; then
+            defer "failed to extract comment ID from: ${comment_url:0:100}"
+            return
+        fi
+
+        kodo_pipeline_set "$EVENT_ID" "dev" "intent_comment_id" "$comment_id"
+        kodo_pipeline_set "$EVENT_ID" "dev" "intent_comment_at" "$(date +%s)"
+        kodo_log "DEV: posted intent comment #$comment_id on issue #$issue_num"
+        # Yield — brain re-dispatches on next cycle to check for response
+        return
+    fi
+
+    # Step 2: Comment exists — check for approval/denial signals
+
+    # Check labels first (cheaper than reactions API)
+    local labels_json
+    labels_json=$("$SCRIPT_DIR/kodo-git.sh" issue-labels-get "$REPO_TOML" "$issue_num" 2>/dev/null) || labels_json='[]'
+    local labels_lower
+    labels_lower=$(echo "$labels_json" | jq -r '.[]' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+
+    if echo "$labels_lower" | grep -qx "kodo-go"; then
+        kodo_log "DEV: issue #$issue_num — kodo-go label found, approving"
+        kodo_pipeline_set "$EVENT_ID" "dev" "intent_decision" "approved"
+        transition "awaiting_intent" "generating"
+        return
+    fi
+
+    if echo "$labels_lower" | grep -qx "kodo-skip"; then
+        kodo_log "DEV: issue #$issue_num — kodo-skip label found, denying"
+        kodo_pipeline_set "$EVENT_ID" "dev" "intent_decision" "denied"
+        defer "intent denied via kodo-skip label"
+        return
+    fi
+
+    # Check reactions on the intent comment
+    local reactions_json
+    reactions_json=$("$SCRIPT_DIR/kodo-git.sh" comment-reactions "$REPO_TOML" "$comment_id" 2>/dev/null) || reactions_json='{"thumbs_up":0,"thumbs_down":0}'
+    local thumbs_up thumbs_down
+    thumbs_up=$(echo "$reactions_json" | jq -r '.thumbs_up // 0' 2>/dev/null)
+    thumbs_down=$(echo "$reactions_json" | jq -r '.thumbs_down // 0' 2>/dev/null)
+
+    if [[ "$thumbs_up" -gt 0 ]]; then
+        kodo_log "DEV: issue #$issue_num — 👍 reaction found, approving"
+        kodo_pipeline_set "$EVENT_ID" "dev" "intent_decision" "approved"
+        transition "awaiting_intent" "generating"
+        return
+    fi
+
+    if [[ "$thumbs_down" -gt 0 ]]; then
+        kodo_log "DEV: issue #$issue_num — 👎 reaction found, denying"
+        kodo_pipeline_set "$EVENT_ID" "dev" "intent_decision" "denied"
+        defer "intent denied via 👎 reaction"
+        return
+    fi
+
+    # No signal yet — check timeout
+    local comment_at
+    comment_at=$(kodo_pipeline_get "$EVENT_ID" "dev" "intent_comment_at")
+    local now
+    now=$(date +%s)
+    local window_hours
+    window_hours=$(kodo_toml_get "$REPO_TOML" "dev" "intent_window_hours" 2>/dev/null)
+    [[ -z "$window_hours" ]] && window_hours=24
+    local window_secs=$((window_hours * 3600))
+
+    if [[ -n "$comment_at" && "$comment_at" != "null" && $((now - comment_at)) -ge $window_secs ]]; then
+        kodo_log "DEV: issue #$issue_num — intent window expired (${window_hours}h)"
+        defer "intent window expired after ${window_hours}h"
+        return
+    fi
+
+    # Still waiting — yield for brain to re-dispatch
+    kodo_log "DEV: issue #$issue_num — still waiting for intent signal"
 }
 
 do_generating() {
@@ -1819,6 +1973,7 @@ main() {
         case "$state" in
             pending)         transition "pending" "triaging"; do_triaging ;;
             triaging)        do_triaging ;;
+            awaiting_intent) do_awaiting_intent ;;
             generating)      do_generating ;;
             hard_gates)      do_hard_gates ;;
             awaiting_feedback) do_awaiting_feedback ;;

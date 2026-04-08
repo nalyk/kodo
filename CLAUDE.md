@@ -77,18 +77,22 @@ feed the transition decisions made by engine scripts.
 
 ### Dev Domain
 ```
-[*] → pending → triaging ─┬─► generating → hard_gates ─┬─► awaiting_feedback → applying_suggestions → hard_gates (loop)
+[*] → pending → triaging ─┬─► awaiting_intent ─┬─► generating (intent approved)
+                           │                     └─► deferred   (intent denied / expired)
+                           ├─► generating → hard_gates ─┬─► awaiting_feedback → applying_suggestions → hard_gates (loop)
                            ├─► auditing (PRs)            ├─► auditing → scanning ─┬─► auto_merge → releasing → monitoring ─┬─► resolved (clean window)
                            ├─► hard_gates (deps)         │                         ├─► balloting → guarded_merge → releasing │
                            └─► deferred                  └─► auto_merge (deps)     └─► deferred (retry max 2) → closed      ├─► reverting → resolved (auto-reverted)
                                                                                                                              └─► reverting → deferred (revert failed, human needed)
                            Rebase loop: auto_merge/guarded_merge → hard_gates (on BEHIND/conflict)
+                           Intent gate: controlled by issue_intent_gate in repo TOML (default true for new repos)
 ```
 Note: Engine loops through all states in one invocation. CI status is checked before every merge.
 Concurrent processing is PID-locked — two engines cannot process the same event simultaneously.
 Bot feedback (Gemini Code Assist, CodeRabbit) is awaited for KODO-generated PRs before auditing.
 Server-side rebase is attempted when branch is behind base — loops back through hard_gates for re-verification.
 Post-merge monitoring polls main-branch CI for the merge commit on a 15-minute cadence (configurable via `monitoring_window_hours`, default 48). CI failure triggers automatic revert PR. Failed reverts alert the operator via Telegram.
+Issue intent gate: when `issue_intent_gate = true` in repo TOML (default for new repos), KŌDŌ posts a comment on new issues asking the maintainer to approve automation via `kodo-go` label or 👍 reaction. Without approval within `intent_window_hours` (default 24), the event is deferred. Repos can opt out by setting `issue_intent_gate = false`. Existing repos without this field behave as before (gate disabled).
 
 ### Marketing Domain
 ```

@@ -164,6 +164,21 @@ _gh_compare() {
     gh api "repos/$slug/compare/${base}...${head}" --jq '.commits[] | {sha: .sha[0:7], message: .commit.message}'
 }
 
+# Get labels on an issue (read-only)
+_gh_issue_labels_get() {
+    local slug="$1" issue_num="$2"
+    gh api "repos/${slug}/issues/${issue_num}/labels" --jq '[.[].name]' 2>/dev/null || echo '[]'
+}
+
+# Get reaction counts on an issue comment (read-only)
+_gh_comment_reactions() {
+    local slug="$1" comment_id="$2"
+    gh api "repos/${slug}/issues/comments/${comment_id}/reactions" --jq '{
+        thumbs_up: [.[] | select(.content == "+1")] | length,
+        thumbs_down: [.[] | select(.content == "-1")] | length
+    }' 2>/dev/null || echo '{"thumbs_up":0,"thumbs_down":0}'
+}
+
 # ── GitLab (glab) ────────────────────────────────────────────
 
 _glab_pr_list() {
@@ -495,6 +510,8 @@ main() {
                 pr-merge-sha)       _gh_pr_merge_sha "$slug" "$@" ;;
                 commit-checks)      _gh_commit_checks "$slug" "$@" ;;
                 pr-revert)          _gh_pr_revert "$slug" "$@" ;;
+                issue-labels-get)   _gh_issue_labels_get "$slug" "$@" ;;
+                comment-reactions)  _gh_comment_reactions "$slug" "$@" ;;
                 *) kodo_log "ERROR: unknown action '$action'"; exit 1 ;;
             esac
             ;;
@@ -509,6 +526,8 @@ main() {
                 issue-label)        _glab_issue_label "$slug" "$@" ;;
                 release-get)        _glab_release_get "$slug" "$@" ;;
                 release-edit)       _glab_release_edit "$slug" "$@" ;;
+                issue-labels-get)   echo '[]' ;;
+                comment-reactions)  echo '{"thumbs_up":0,"thumbs_down":0}' ;;
                 *) _stub_not_supported "$provider" "$action" ;;
             esac
             ;;

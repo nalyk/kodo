@@ -75,7 +75,7 @@ Every pipeline event follows a deterministic state machine per domain.
 You do NOT control transitions — `kodo-transition.sh` does. Your outputs
 feed the transition decisions made by the engine scripts.
 
-- Dev: pending → triaging → generating → hard_gates → awaiting_feedback → applying_suggestions → hard_gates (loop) → auditing → scanning → auto_merge/balloting → releasing → monitoring → resolved
+- Dev: pending → triaging → [awaiting_intent →] generating → hard_gates → awaiting_feedback → applying_suggestions → hard_gates (loop) → auditing → scanning → auto_merge/balloting → releasing → monitoring → resolved
 - Post-merge: monitoring → resolved (clean) | monitoring → reverting → resolved (auto-reverted) | reverting → deferred (revert failed)
 - Rebase: auto_merge/guarded_merge → hard_gates (when branch BEHIND base)
 - Mkt: pending → drafting → reviewing → published
@@ -104,6 +104,23 @@ Three per-repo TOML flags control hard gate behavior. All default to `false` (sa
 
 Empty or placeholder test/lint commands (e.g., `echo no-tests`) are treated as "no real command".
 Repos onboarded without a detectable test command get an empty `test_command` and a stderr warning.
+
+---
+
+## Issue Intent Gate
+
+When `issue_intent_gate = true` in a repo's `[dev]` section (default for new repos), the dev engine
+posts a confirmation comment on new issues before generating code. The maintainer must approve via
+a `kodo-go` label or 👍 reaction on the comment. Denial is via `kodo-skip` label or 👎 reaction.
+
+| TOML field | Section | Default | Effect |
+|------------|---------|---------|--------|
+| `issue_intent_gate` | `[dev]` | `true` (new repos) | When true, KŌDŌ waits for approval before code gen |
+| `intent_window_hours` | `[dev]` | `24` | Hours to wait before deferring on no response |
+
+If the field is missing from a repo TOML (e.g., existing repos onboarded before this feature),
+the gate defaults to disabled (backward compatible). In shadow mode, the gate is auto-approved
+since comments cannot be posted.
 
 ---
 
