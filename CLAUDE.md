@@ -127,9 +127,10 @@ No preamble, no explanation, no markdown wrapping. Just the JSON object.
 2. **Layer 1.5** — Bot feedback loop: await reviews from trusted bots (Gemini Code Assist, CodeRabbit), auto-apply suggestions, adjust confidence
 3. **Layer 2** — LLM review (you: confidence scoring via confidence.schema.json, with feedback delta applied)
 4. **Layer 2.5** — Security scan (semgrep on checked-out PR branch, confidence penalty for findings)
-5. **Layer 3** — Balloting (you + Gemini + Qwen vote in parallel, 2/3 consensus for medium confidence)
-6. **Pre-merge** — Mergeability check + auto-rebase if BEHIND base, CI status check: green required, pending = yield, red = defer
-7. **Post-merge** — Monitoring window (default 48h, configurable via `monitoring_window_hours`). Polls main-branch CI for the merge commit every 15 minutes. CI failure triggers automatic revert PR. Failed reverts alert the operator via Telegram and defer for manual intervention.
+5. **Layer 3** — Balloting (2/3 consensus for medium confidence, voter pool depends on anti-self-grading policy)
+6. **Anti-self-grading** — KODO-generated PRs (where Claude was architect in Phase A) are reviewed and balloted by non-Claude models. Reviewer: Codex (preferred) or Gemini. Ballot voters: Codex + Gemini + Qwen (Claude excluded). Human-authored PRs use the default pool (Claude as primary reviewer, Claude + Gemini + Qwen as voters). Rationale: Claude as architect has prior commitment to its own plan — asking Claude to score the diff creates a closed self-grading loop.
+7. **Pre-merge** — Mergeability check + auto-rebase if BEHIND base, CI status check: green required, pending = yield, red = defer
+8. **Post-merge** — Monitoring window (default 48h, configurable via `monitoring_window_hours`). Polls main-branch CI for the merge commit every 15 minutes. CI failure triggers automatic revert PR. Failed reverts alert the operator via Telegram and defer for manual intervention.
 
 ## Budget Enforcement
 
