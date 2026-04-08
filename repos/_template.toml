@@ -23,6 +23,8 @@ apply_bot_suggestions = true            # Auto-apply code suggestions from trust
 trusted_review_bots = ["gemini-code-assist[bot]", "coderabbit[bot]"]
 max_rebase_attempts = 2                 # Max server-side rebase retries before deferring
 
+monitoring_window_hours = 48            # Post-merge CI monitoring window (hours)
+
 [mkt]
 enabled = true                          # Enable marketing engine
 welcome_new_contributors = true         # Auto-welcome first-time contributors

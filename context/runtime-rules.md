@@ -60,7 +60,8 @@ Every pipeline event follows a deterministic state machine per domain.
 You do NOT control transitions — `kodo-transition.sh` does. Your outputs
 feed the transition decisions made by the engine scripts.
 
-- Dev: pending → triaging → generating → hard_gates → awaiting_feedback → applying_suggestions → hard_gates (loop) → auditing → scanning → auto_merge/balloting → releasing → resolved
+- Dev: pending → triaging → generating → hard_gates → awaiting_feedback → applying_suggestions → hard_gates (loop) → auditing → scanning → auto_merge/balloting → releasing → monitoring → resolved
+- Post-merge: monitoring → resolved (clean) | monitoring → reverting → resolved (auto-reverted) | reverting → deferred (revert failed)
 - Rebase: auto_merge/guarded_merge → hard_gates (when branch BEHIND base)
 - Mkt: pending → drafting → reviewing → published
 - PM: pending → analyzing → reported
@@ -72,6 +73,7 @@ Trusted bot suggestions are auto-applied; CHANGES_REQUESTED causes immediate def
 Concurrent processing is PID-locked — two engines cannot process the same event simultaneously.
 Invalid transitions are rejected. Deferred events retry max 2 times, then auto-close.
 Feedback rounds and rebase attempts are configurable per repo via TOML.
+Post-merge monitoring polls main-branch CI every 15 minutes for `monitoring_window_hours` (default 48). CI failure triggers automatic revert. Failed reverts alert operator via Telegram and defer.
 
 ---
 

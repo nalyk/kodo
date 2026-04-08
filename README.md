@@ -28,7 +28,7 @@ You have repos. Things happen in them — PRs open, issues pile up, releases shi
 
 KŌDŌ handles it. Three engines run in parallel:
 
-**Dev** — Reviews every PR with structured confidence scoring. Score ≥90: auto-merge. Score 50-89: three AI models vote in parallel, 2/3 consensus required. Score <50: deferred, you deal with it. Hard gates (tests, lint, semgrep, diff size) run *before* any AI touches it. Bot feedback loop: waits for reviews from Gemini Code Assist / CodeRabbit, auto-applies code suggestions, adjusts confidence. Auto-rebase when branch falls behind base. CI status verified before every merge. 48h post-merge rollback window. Dependency updates from Dependabot/Renovate take a zero-LLM fast path through hard gates — detected, tested, merged in seconds.
+**Dev** — Reviews every PR with structured confidence scoring. Score ≥90: auto-merge. Score 50-89: three AI models vote in parallel, 2/3 consensus required. Score <50: deferred, you deal with it. Hard gates (tests, lint, semgrep, diff size) run *before* any AI touches it. Bot feedback loop: waits for reviews from Gemini Code Assist / CodeRabbit, auto-applies code suggestions, adjusts confidence. Auto-rebase when branch falls behind base. CI status verified before every merge. 48h post-merge monitoring window — polls main-branch CI for the merge commit on a 15-minute cadence, CI failure triggers automatic revert PR, failed reverts page the operator via Telegram. Dependency updates from Dependabot/Renovate take a zero-LLM fast path through hard gates — detected, tested, merged in seconds.
 
 **Marketing** — Welcomes first-time contributors within minutes. Generates changelogs from commit history. Curates good-first-issues. Runs contributor spotlights. All with the repo's own voice, not generic AI slop.
 
@@ -72,7 +72,11 @@ mergeability check → BEHIND? → server-side rebase → re-verify
     ↓ clean
 CI status check (green required)
     ↓ CI green
-auto-merge → 48h rollback window → resolved
+auto-merge → 48h post-merge monitoring → resolved
+    ↓ CI red on main within monitoring window
+    automatic revert PR → Telegram alert → operator review
+    ↓ revert fails
+    deferred → Telegram HIGH alert → manual intervention
 
     ↓ score 50-89
 ballot (Claude + Gemini + Qwen vote in parallel, 2/3 required)

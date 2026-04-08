@@ -1440,8 +1440,7 @@ do_auto_merge() {
     _check_ci_and_merge "$pr_num" "auto_merge" || ci_result=$?
 
     case "$ci_result" in
-        0)  kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
-                VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'clean');"
+        0)  kodo_pipeline_set "$EVENT_ID" "dev" "merge_confidence" "$confidence"
             transition "auto_merge" "releasing"
             ;;
         1)  kodo_log "DEV: auto_merge waiting for CI — engine yielding"
@@ -1487,8 +1486,7 @@ do_guarded_merge() {
     _check_ci_and_merge "$pr_num" "guarded_merge" || ci_result=$?
 
     case "$ci_result" in
-        0)  kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
-                Values ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'clean');"
+        0)  kodo_pipeline_set "$EVENT_ID" "dev" "merge_confidence" "$confidence"
             transition "guarded_merge" "releasing"
             ;;
         1)  kodo_log "DEV: guarded_merge waiting for CI — engine yielding"
@@ -1506,19 +1504,141 @@ do_releasing() {
     kodo_log "DEV: releasing $EVENT_ID"
 
     if kodo_toml_bool "$REPO_TOML" "dev" "semver_release"; then
-        # Auto-tag semver release
         kodo_log "DEV: semver release enabled — would tag here"
-        # In practice: determine next semver, create tag via kodo-git.sh
     fi
 
-    transition "releasing" "resolved"
-    kodo_log "DEV: $EVENT_ID resolved"
+    # Fetch merge SHA for post-merge monitoring
+    local pr_num merge_sha
+    pr_num=$(_get_pr_num)
+    merge_sha=""
+    if [[ -n "$pr_num" ]]; then
+        merge_sha=$("$SCRIPT_DIR/kodo-git.sh" pr-merge-sha "$REPO_TOML" "$pr_num" 2>/dev/null) || true
+    fi
+
+    if [[ -n "$merge_sha" && "$merge_sha" != "null" ]]; then
+        kodo_pipeline_set "$EVENT_ID" "dev" "merge_sha" "$merge_sha"
+        kodo_pipeline_set "$EVENT_ID" "dev" "monitoring_started_at" "$(date +%s)"
+        transition "releasing" "monitoring"
+        kodo_log "DEV: $EVENT_ID entering monitoring (sha: ${merge_sha:0:12})"
+    else
+        # Graceful degradation: no merge SHA available (shadow mode, old gh, etc.)
+        kodo_log "DEV: WARN — could not fetch merge SHA for $EVENT_ID, skipping monitoring"
+        local confidence
+        confidence=$(kodo_pipeline_get "$EVENT_ID" "dev" "merge_confidence")
+        confidence="${confidence:-0}"
+        kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
+            VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'clean');"
+        transition "releasing" "resolved"
+        kodo_log "DEV: $EVENT_ID resolved (no monitoring)"
+    fi
+}
+
+do_monitoring() {
+    local monitoring_started_at merge_sha
+    monitoring_started_at=$(kodo_pipeline_get "$EVENT_ID" "dev" "monitoring_started_at")
+    merge_sha=$(kodo_pipeline_get "$EVENT_ID" "dev" "merge_sha")
+
+    if [[ -z "$monitoring_started_at" || -z "$merge_sha" ]]; then
+        kodo_log "DEV: WARN — missing monitoring metadata for $EVENT_ID, resolving"
+        transition "monitoring" "resolved"
+        return
+    fi
+
+    local now elapsed window_hours window_seconds
+    now=$(date +%s)
+    elapsed=$((now - monitoring_started_at))
+    window_hours=$(kodo_toml_get "$REPO_TOML" "dev" "monitoring_window_hours" 2>/dev/null)
+    window_hours="${window_hours:-48}"
+    window_seconds=$((window_hours * 3600))
+
+    if [[ "$elapsed" -ge "$window_seconds" ]]; then
+        # Monitoring window expired — merge is clean
+        local confidence
+        confidence=$(kodo_pipeline_get "$EVENT_ID" "dev" "merge_confidence")
+        confidence="${confidence:-0}"
+        kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
+            VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'clean');"
+        transition "monitoring" "resolved"
+        kodo_log "DEV: $EVENT_ID monitoring complete — clean (${elapsed}s elapsed)"
+        return
+    fi
+
+    # Poll CI status for the merge commit
+    local ci_status
+    ci_status=$("$SCRIPT_DIR/kodo-git.sh" commit-checks "$REPO_TOML" "$merge_sha" 2>&1) || {
+        kodo_log "DEV: commit-checks API failed for $EVENT_ID — yielding (transient)"
+        return
+    }
+
+    local ci_state
+    ci_state=$(echo "$ci_status" | jq -r '.state' 2>/dev/null)
+    kodo_log "DEV: monitoring $EVENT_ID — CI state: $ci_state (${elapsed}s/${window_seconds}s)"
+
+    case "$ci_state" in
+        FAILURE)
+            kodo_log "DEV: CI FAILURE on main after merge $EVENT_ID — triggering revert"
+            transition "monitoring" "reverting"
+            ;;
+        SUCCESS|PENDING|NO_CHECKS)
+            # Yield — brain re-dispatches on 15-min cadence
+            ;;
+        *)
+            kodo_log "DEV: unexpected CI state '$ci_state' for $EVENT_ID — yielding"
+            ;;
+    esac
 }
 
 do_reverting() {
     kodo_log "DEV: reverting $EVENT_ID (CI regression detected)"
-    # In practice: create revert PR, merge it
-    defer "revert completed"
+
+    local merge_sha pr_num
+    merge_sha=$(kodo_pipeline_get "$EVENT_ID" "dev" "merge_sha")
+    pr_num=$(_get_pr_num)
+
+    if [[ -z "$merge_sha" || "$merge_sha" == "null" ]]; then
+        kodo_log "DEV: WARN — no merge SHA for revert of $EVENT_ID"
+        kodo_send_telegram "⚠ KŌDŌ revert needed but no merge SHA: $REPO_SLUG $EVENT_ID. Manual intervention required."
+        defer "revert failed — no merge SHA"
+        return
+    fi
+
+    # Shadow mode: log only
+    if kodo_is_shadow "$REPO_TOML"; then
+        kodo_log "DEV: SHADOW — would revert $merge_sha on $REPO_SLUG"
+        local confidence
+        confidence=$(kodo_pipeline_get "$EVENT_ID" "dev" "merge_confidence")
+        confidence="${confidence:-0}"
+        kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
+            VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'reverted');"
+        transition "reverting" "resolved"
+        return
+    fi
+
+    # Live mode: create and merge revert PR
+    local pr_title
+    pr_title=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_title")
+    pr_title="${pr_title:-PR #${pr_num:-unknown}}"
+
+    if "$SCRIPT_DIR/kodo-git.sh" pr-revert "$REPO_TOML" "$merge_sha" "$EVENT_ID" "$pr_title" 2>/dev/null; then
+        local confidence
+        confidence=$(kodo_pipeline_get "$EVENT_ID" "dev" "merge_confidence")
+        confidence="${confidence:-0}"
+        kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
+            VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'reverted');"
+        kodo_send_telegram "🚨 KŌDŌ auto-revert: $REPO_SLUG #${pr_num:-?} reverted after CI regression. SHA ${merge_sha:0:12}. Operator review required."
+        transition "reverting" "resolved"
+        kodo_log "DEV: $EVENT_ID reverted successfully"
+    else
+        # Revert failed — needs human intervention
+        local confidence
+        confidence=$(kodo_pipeline_get "$EVENT_ID" "dev" "merge_confidence")
+        confidence="${confidence:-0}"
+        kodo_sql "INSERT INTO merge_outcomes (event_id, repo, confidence, outcome)
+            VALUES ('$(kodo_sql_escape "$EVENT_ID")', '$(kodo_sql_escape "$REPO_ID")', $confidence, 'hotfixed');"
+        kodo_send_telegram "🔴 KŌDŌ revert FAILED: $REPO_SLUG #${pr_num:-?} SHA ${merge_sha:0:12}. Auto-revert could not complete. MANUAL INTERVENTION REQUIRED."
+        defer "revert failed — manual intervention needed"
+        kodo_log "DEV: $EVENT_ID revert failed — deferred for operator"
+    fi
 }
 
 # ── Main State Machine Driver ────────────────────────────────
@@ -1556,6 +1676,7 @@ main() {
             auto_merge)      do_auto_merge ;;
             guarded_merge)   do_guarded_merge ;;
             releasing)       do_releasing ;;
+            monitoring)      do_monitoring ;;
             reverting)       do_reverting ;;
             resolved|closed)
                 kodo_log "DEV: $EVENT_ID reached terminal state: $state"

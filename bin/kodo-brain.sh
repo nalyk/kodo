@@ -238,12 +238,29 @@ main() {
 
     # Phase 2b: Advance events stuck in intermediate states
     # Re-dispatch engines for events that need further processing
+    # Monitoring events use a slower 900s cadence to avoid GitHub API rate-limit pressure
     local stalled
     stalled=$(kodo_sql "SELECT event_id, repo, domain, state FROM pipeline_state
-        WHERE state NOT IN ('resolved', 'closed', 'published', 'reported', 'deferred')
+        WHERE state NOT IN ('resolved', 'closed', 'published', 'reported', 'deferred', 'monitoring')
         AND (processing_pid IS NULL OR processing_pid = 0)
         AND updated_at < datetime('now', '-300 seconds')
         ORDER BY updated_at ASC LIMIT 15;")
+
+    # Monitoring events: 15-minute re-dispatch cadence
+    local monitoring_stalled
+    monitoring_stalled=$(kodo_sql "SELECT event_id, repo, domain, state FROM pipeline_state
+        WHERE state = 'monitoring'
+        AND (processing_pid IS NULL OR processing_pid = 0)
+        AND updated_at < datetime('now', '-900 seconds')
+        ORDER BY updated_at ASC LIMIT 5;")
+    if [[ -n "$monitoring_stalled" ]]; then
+        if [[ -n "$stalled" ]]; then
+            stalled="${stalled}
+${monitoring_stalled}"
+        else
+            stalled="$monitoring_stalled"
+        fi
+    fi
 
     if [[ -n "$stalled" ]]; then
         while IFS='|' read -r event_id repo domain state; do
