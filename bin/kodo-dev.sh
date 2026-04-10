@@ -168,13 +168,31 @@ _triage_issue() {
         return
     fi
 
-    # If a PR already exists from a prior run, skip code gen and go to feedback/audit
+    # If a PR already exists from a prior run, check if it's still open.
+    # Closed/merged PRs should not re-enter the feedback loop — re-generate instead.
     local existing_pr
     existing_pr=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_number")
     if [[ -n "$existing_pr" && "$existing_pr" != "null" ]]; then
-        kodo_log "DEV: issue #$issue_num — PR #$existing_pr exists, re-entering feedback loop"
-        transition "triaging" "hard_gates"
-        return
+        local pr_state
+        pr_state=$("$SCRIPT_DIR/kodo-git.sh" pr-checks "$REPO_TOML" "$existing_pr" 2>/dev/null \
+            | jq -r '.pr_state // "UNKNOWN"' 2>/dev/null) || pr_state="UNKNOWN"
+        # Also check via direct API if pr-checks doesn't expose state
+        if [[ "$pr_state" == "UNKNOWN" ]]; then
+            pr_state=$(gh pr view "$existing_pr" --repo "$REPO_SLUG" --json state --jq '.state' 2>/dev/null) || pr_state="UNKNOWN"
+        fi
+        if [[ "$pr_state" == "OPEN" ]]; then
+            kodo_log "DEV: issue #$issue_num — PR #$existing_pr still OPEN, re-entering feedback loop"
+            transition "triaging" "hard_gates"
+            return
+        else
+            kodo_log "DEV: issue #$issue_num — PR #$existing_pr is $pr_state, clearing metadata for re-generation"
+            kodo_pipeline_set "$EVENT_ID" "dev" "pr_number" ""
+            kodo_pipeline_set "$EVENT_ID" "dev" "pr_url" ""
+            kodo_pipeline_set "$EVENT_ID" "dev" "pr_branch" ""
+            kodo_pipeline_set "$EVENT_ID" "dev" "gen_cli" ""
+            kodo_pipeline_set "$EVENT_ID" "dev" "architect_cli" ""
+            kodo_pipeline_set "$EVENT_ID" "dev" "work_dir" ""
+        fi
     fi
 
     # Intent gate: require maintainer approval before generating code
@@ -494,7 +512,9 @@ DO NOT modify any files. ONLY read and produce the plan as text.")"
         fi
 
         # Heuristic check for suspicious shell/exfil patterns in the generated plan
-        if printf '%s' "$implementation_plan" | grep -qiE '(curl\s|wget\s|nc\s|bash\s+-c|eval\s|rm\s+-rf|gh\s+secret|gh\s+auth|export\s+(AWS_|GITHUB_TOKEN|GITLAB_TOKEN))'; then
+        # curl/wget alone are not suspicious (tests legitimately reference them).
+        # Flag only exfiltration patterns: piping to shell, posting secrets, recursive delete.
+        if printf '%s' "$implementation_plan" | grep -qiE '(curl\s.*\|\s*(ba)?sh|wget\s.*\|\s*(ba)?sh|curl\s+-[dF].*(@/|secret|token|passw)|nc\s+-[el]|bash\s+-c|eval\s|rm\s+-rf\s+/|gh\s+secret|gh\s+auth\s+login|export\s+(AWS_SECRET|GITHUB_TOKEN|GITLAB_TOKEN))'; then
             kodo_log "DEV: SUSPICIOUS CONTENT in implementation plan for issue #$issue_num"
             kodo_send_telegram "KODO flagged suspicious content in plan for $REPO_SLUG #$issue_num. Hash: $body_hash. Auto-deferring."
             defer "suspicious patterns in generated plan"
