@@ -214,6 +214,15 @@ default branch are detected from the cloned repo's filesystem — no LLM calls f
 - Trailers: `Event-ID:`, `Confidence:`, `Model:`
 - PR title: `[kodo-{domain}] {action}: {description}`
 
+## Git Provider Parity
+
+GitHub: full pipeline (review, merge, rollback, feedback loop, suggestion apply).
+GitLab: full pipeline (review, merge, rollback, feedback loop, suggestion apply via GitLab native APIs).
+Gitea, Bitbucket: adapter stubs only — pipeline operations not yet implemented.
+
+All git operations go through `kodo-git.sh` which abstracts the provider. Use
+`kodo-git.sh provider-capabilities <repo-toml>` to query supported actions at runtime.
+
 ---
 
 ## Architecture Reference

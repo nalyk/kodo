@@ -108,7 +108,9 @@ All state transitions go through one file (`kodo-transition.sh`). Invalid transi
 └── kodo.db                   SQLite. 10 tables. the brain's memory
 ```
 
-GitHub day-one. GitLab day-one. Gitea/Bitbucket: adapter ready, endpoints stubbed.
+GitHub: full pipeline (review, merge, rollback, feedback loop, suggestion apply).
+GitLab: full pipeline (review, merge, rollback, feedback loop, suggestion apply via GitLab native APIs).
+Gitea, Bitbucket: adapter stubs only — pipeline operations not yet implemented.
 
 ---
 
