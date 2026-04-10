@@ -639,7 +639,7 @@ _Automated analysis by KŌDŌ | Event: $EVENT_ID | Model: ${gen_cli}_" 2>/dev/nu
     # If tests fail, give the LLM one chance to fix
     local test_cmd
     test_cmd="$(kodo_toml_get "$REPO_TOML" "dev" "test_command")"
-    if [[ -n "$test_cmd" && "$test_cmd" != "echo no-tests" ]]; then
+    if [[ -n "$test_cmd" ]] && ! _is_placeholder_cmd "$test_cmd"; then
         # Install dependencies (required for test execution)
         _hb
         kodo_log "DEV: installing dependencies in $work_dir"

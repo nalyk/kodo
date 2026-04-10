@@ -37,7 +37,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_community_dedup
 CREATE TABLE IF NOT EXISTS pm_artifacts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     repo       TEXT NOT NULL,
-    type       TEXT NOT NULL CHECK (type IN ('weekly', 'triage', 'evaluation')),
+    type       TEXT NOT NULL CHECK (type IN ('weekly', 'triage', 'evaluation', 'calibration')),
     data_json  TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -134,3 +134,25 @@ CREATE INDEX IF NOT EXISTS idx_pr_feedback_event ON pr_feedback(event_id);
 CREATE INDEX IF NOT EXISTS idx_pipeline_monitoring
     ON pipeline_state(state, updated_at)
     WHERE state = 'monitoring';
+
+-- Calibration convenience view: 30-day merge outcomes bucketed by confidence band
+CREATE VIEW IF NOT EXISTS merge_outcome_stats_30d AS
+SELECT
+    CASE
+        WHEN confidence >= (SELECT threshold FROM confidence_bands WHERE band = 'auto_merge')
+            THEN 'high'
+        WHEN confidence >= (SELECT threshold FROM confidence_bands WHERE band = 'ballot')
+            THEN 'medium'
+        ELSE 'low'
+    END AS band,
+    COUNT(*) AS total,
+    SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) AS clean_count,
+    SUM(CASE WHEN outcome IN ('reverted', 'hotfixed') THEN 1 ELSE 0 END) AS incident_count,
+    ROUND(
+        CAST(SUM(CASE WHEN outcome IN ('reverted', 'hotfixed') THEN 1 ELSE 0 END) AS REAL)
+        / NULLIF(COUNT(*), 0),
+        3
+    ) AS incident_rate
+FROM merge_outcomes
+WHERE merged_at > datetime('now', '-30 days')
+GROUP BY band;
