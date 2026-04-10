@@ -256,3 +256,25 @@ cron (4 entries)
 Key columns in `pipeline_state`: `payload_json` (event data from GitHub), `metadata_json` (inter-state data: confidence, model, ballot results, CI state, feedback delta, rebase count), `processing_pid` (concurrent processing lock).
 
 Schema: `sql/schema.sql`
+
+---
+
+## Testing
+
+KODO has a fixture-based regression harness in `test/`. To run:
+
+```bash
+bash test/run-fixtures.sh
+```
+
+The harness mocks all external CLIs (claude, codex, gh, glab, semgrep) and exercises
+state transition paths against deterministic fixtures. No network required.
+
+**Adding a new scenario:**
+1. Create a fixture directory in `test/fixtures/<scenario-name>/` with JSON responses
+2. Add a scenario script in `test/scenarios/<NN>-<name>.sh`
+3. Add expected output in `test/expected/<NN>-<name>.expected`
+4. Run the harness to verify
+
+Every PR to kodo-dev runs the harness via `.github/workflows/fixture-tests.yml`.
+A failing harness is a blocking bug.

@@ -1,0 +1,7 @@
+=== pipeline_state ===
+evt-test-06-IssuesEvent|dev|deferred
+=== merge_outcomes ===
+=== deferred_queue ===
+evt-test-06-IssuesEvent|dev|intent window expired after 24h
+=== community_log ===
+=== mock_calls ===

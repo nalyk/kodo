@@ -1,0 +1,8 @@
+=== pipeline_state ===
+evt-test-07-PullRequestEvent|dev|resolved
+=== merge_outcomes ===
+evt-test-07-PullRequestEvent|reverted
+=== deferred_queue ===
+=== community_log ===
+=== mock_calls ===
+pr-revert abc123def456 evt-test-07-PullRequestEvent PR #107

@@ -1,0 +1,10 @@
+diff --git a/src/calc.ts b/src/calc.ts
+--- a/src/calc.ts
++++ b/src/calc.ts
+@@ -5,3 +5,5 @@
+ export function calculate(input: number): number {
+-  return input * 2;
++  const result = input * input;
++  // Subtle: no overflow check
++  return result;
+ }

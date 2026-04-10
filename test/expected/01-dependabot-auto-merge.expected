@@ -1,0 +1,8 @@
+=== pipeline_state ===
+evt-test-01-PullRequestEvent|dev|resolved
+=== merge_outcomes ===
+evt-test-01-PullRequestEvent|clean
+=== deferred_queue ===
+=== community_log ===
+=== mock_calls ===
+pr-merge 101

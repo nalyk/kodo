@@ -1,0 +1,7 @@
+=== pipeline_state ===
+evt-test-02-PullRequestEvent|dev|deferred
+=== merge_outcomes ===
+=== deferred_queue ===
+evt-test-02-PullRequestEvent|dev|ballot: no consensus (0/2)
+=== community_log ===
+=== mock_calls ===

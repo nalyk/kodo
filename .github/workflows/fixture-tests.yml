@@ -1,0 +1,30 @@
+name: KODO Fixture Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sqlite3 jq shellcheck
+
+      - name: Lint shell scripts
+        run: shellcheck bin/*.sh test/*.sh test/scenarios/*.sh
+
+      - name: Syntax check
+        run: |
+          for f in bin/*.sh test/*.sh test/scenarios/*.sh; do
+            bash -n "$f"
+          done
+
+      - name: Run fixture harness
+        run: bash test/run-fixtures.sh
