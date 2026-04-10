@@ -388,7 +388,7 @@ do_generating() {
     # If kodo branch already exists (from a prior run), clone it to continue work.
     # Otherwise, clone default branch and create new kodo branch.
     local branch_name="kodo/dev/${EVENT_ID}"
-    local work_dir
+    local work_dir=""
 
     # Check if our branch already exists on remote
     local branch_exists=""
