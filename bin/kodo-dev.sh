@@ -711,6 +711,18 @@ Fix the failing tests. Do NOT change production code. Make minimal changes."
 
     _hb
     # Step 6: Commit the changes
+    # Clean up tooling artifacts that executor CLIs may leave behind
+    (
+        cd "$work_dir" || exit 1
+        rm -rf .serena/ .claude/ .codex/ .gemini/ .qwen/ 2>/dev/null
+        # Ensure these dirs stay out of future commits via .gitignore
+        if [[ -f .gitignore ]]; then
+            for d in .serena .claude .codex .gemini .qwen; do
+                grep -qxF "$d/" .gitignore 2>/dev/null || true
+            done
+        fi
+    ) || true
+
     local git_stderr
     git_stderr=$(mktemp); _KODO_TMPFILES+=("$git_stderr")
     (
