@@ -734,7 +734,10 @@ Fix the failing tests. Do NOT change production code. Make minimal changes."
     # Clean up tooling artifacts that executor CLIs may leave behind
     (
         cd "$work_dir" || exit 1
-        rm -rf .serena/ .claude/ .codex/ .gemini/ .qwen/ 2>/dev/null
+        # Remove both directories and files (codex creates .codex as a file)
+        rm -rf .serena .claude .codex .gemini .qwen .serena/ .claude/ .codex/ .gemini/ .qwen/ 2>/dev/null
+        # Also remove common settings files that CLIs may create
+        rm -f .claude/settings.json .codex/settings.json 2>/dev/null
         # Ensure these dirs stay out of future commits via .gitignore
         if [[ -f .gitignore ]]; then
             for d in .serena .claude .codex .gemini .qwen; do
@@ -1367,8 +1370,17 @@ Score confidence 0-100 for merge safety. Identify risks and behavioral changes."
 
         if [[ -n "$review_output" ]]; then
             confidence=$(echo "$review_output" | jq -r '.score // 0' 2>/dev/null)
+        else
+            # Claude invocation failed (timeout, concurrent session, rate limit).
+            # Fall through to Codex/Gemini instead of leaving confidence=0.
+            kodo_log "DEV: claude invocation failed — falling back to alternate reviewer"
+            review_model="none"
         fi
-    elif kodo_cli_available codex; then
+    fi
+
+    # Fallback reviewer chain: Codex → Gemini (fires when Claude was unavailable,
+    # when Claude invocation failed, or when anti-self-grading excludes Claude)
+    if [[ "$review_model" == "none" ]] && kodo_cli_available codex; then
         review_model="codex"
 
         local codex_result
@@ -1396,9 +1408,13 @@ Score confidence 0-100 for merge safety. Identify risks and behavioral changes."
             fi
             review_output="$codex_result"
         else
+            kodo_log "DEV: codex invocation failed — falling back to gemini"
+            review_model="none"
             confidence=70
         fi
-    elif kodo_cli_available gemini; then
+    fi
+
+    if [[ "$review_model" == "none" ]] && kodo_cli_available gemini; then
         # Gemini as reviewer — same prompt/schema structure
         review_model="gemini"
 
@@ -1419,8 +1435,10 @@ Score confidence 0-100 for merge safety. Identify risks and behavioral changes."
         else
             confidence=70
         fi
-    else
-        defer "no review CLI available"
+    fi
+
+    if [[ "$review_model" == "none" ]]; then
+        defer "no review CLI available (claude, codex, gemini all failed or missing)"
         return
     fi
 
