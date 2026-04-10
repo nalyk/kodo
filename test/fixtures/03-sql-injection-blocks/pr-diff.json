@@ -1,0 +1,17 @@
+diff --git a/src/db.ts b/src/db.ts
+--- a/src/db.ts
++++ b/src/db.ts
+@@ -8,2 +8,4 @@
++function query(input: string) {
++  return db.exec(`SELECT * FROM users WHERE name = '${input}'`);
++}
+diff --git a/src/api.ts b/src/api.ts
+--- a/src/api.ts
++++ b/src/api.ts
+@@ -20,2 +20,3 @@
++  const result = db.exec("SELECT * FROM orders WHERE id = " + req.params.id);
+diff --git a/src/handler.ts b/src/handler.ts
+--- a/src/handler.ts
++++ b/src/handler.ts
+@@ -5,2 +5,3 @@
++  db.run("DELETE FROM sessions WHERE token = '" + token + "'");

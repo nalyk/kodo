@@ -1,0 +1,7 @@
+=== pipeline_state ===
+evt-test-03-PullRequestEvent|dev|deferred
+=== merge_outcomes ===
+=== deferred_queue ===
+evt-test-03-PullRequestEvent|dev|security scan: 6 findings (critical)
+=== community_log ===
+=== mock_calls ===

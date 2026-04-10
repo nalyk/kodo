@@ -1,0 +1,7 @@
+=== pipeline_state ===
+evt-test-05-IssuesEvent|dev|deferred
+=== merge_outcomes ===
+=== deferred_queue ===
+evt-test-05-IssuesEvent|dev|prompt injection detected in issue body
+=== community_log ===
+=== mock_calls ===

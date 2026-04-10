@@ -1,0 +1,7 @@
+=== pipeline_state ===
+evt-test-04-PullRequestEvent|dev|deferred
+=== merge_outcomes ===
+=== deferred_queue ===
+evt-test-04-PullRequestEvent|dev|hard gate: diff too large: 803 lines (max: 500)
+=== community_log ===
+=== mock_calls ===

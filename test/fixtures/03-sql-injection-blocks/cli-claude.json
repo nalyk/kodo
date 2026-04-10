@@ -1,0 +1,1 @@
+{"score":80,"summary":"Code compiles but security review pending","risks":[{"severity":"high","description":"Raw SQL concatenation detected"}]}

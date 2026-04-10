@@ -1,0 +1,9 @@
+=== pipeline_state ===
+evt-test-08-PullRequestEvent|dev|pending
+evt-test-08-PullRequestEvent|mkt|published
+=== merge_outcomes ===
+=== deferred_queue ===
+=== community_log ===
+fixture-org-test-repo|new-contributor|welcomed
+=== mock_calls ===
+pr-comment 108 {"score":70,"summary":"mock review","risks":[]}

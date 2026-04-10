@@ -1,0 +1,1 @@
+{"score":65,"summary":"Logic change looks functional but edge cases unclear","risks":[{"severity":"medium","description":"Integer overflow possible on large input"}]}

@@ -123,6 +123,20 @@ Plus your git provider CLI: `gh` or `glab`
 
 ---
 
+### Testing
+
+Fixture-based regression harness in `test/`. Exercises all critical state transition paths against deterministic mocks. No network, no real CLIs, no real APIs.
+
+```
+bash test/run-fixtures.sh
+```
+
+8 scenarios covering: Dependabot auto-merge, medium-confidence ballot, semgrep security block, diff size gate, prompt injection defense, intent gate expiry, post-merge CI revert, and external contributor welcome. Runs in under 10 seconds.
+
+CI runs the harness on every PR via `.github/workflows/fixture-tests.yml`.
+
+---
+
 ### Status
 
 Working implementation. Full-cycle tested against `yoda-digital/iris-gateway` — Scout through resolved, all three engines, all state paths. Shadow mode verified. Dependabot auto-merge path: pending to resolved in under 1 second.

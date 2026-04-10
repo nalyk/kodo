@@ -1,0 +1,40 @@
+# Fixture repo for regression tests
+# Configured to allow fast test execution (no real CI, optional tests/lint)
+
+[repo]
+owner = "fixture-org"
+name = "test-repo"
+provider = "github"
+mode = "live"
+branch_default = "main"
+enabled = true
+
+[dev]
+enabled = true
+test_command = ""
+lint_command = ""
+tests_optional = true
+lint_optional = true
+allow_no_ci = true
+max_diff_lines = 500
+auto_merge_deps = true
+semver_release = false
+await_bot_feedback = false
+feedback_window_minutes = 0
+max_feedback_rounds = 0
+apply_bot_suggestions = false
+trusted_review_bots = []
+max_rebase_attempts = 2
+monitoring_window_hours = 48
+issue_intent_gate = true
+intent_window_hours = 24
+
+[mkt]
+enabled = true
+welcome_new_contributors = true
+generate_changelogs = false
+good_first_issues = false
+contributor_spotlights = false
+
+[pm]
+enabled = false
