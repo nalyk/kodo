@@ -332,6 +332,10 @@ ${monitoring_stalled}"
                 # Retry: deferred → pending (transition increments retry_count)
                 kodo_log "BRAIN: retrying $event_id [$domain] (attempt $((retry_count + 1))/2)"
                 "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "deferred" "pending" "$domain" 2>&1 || true
+                # Reset transient metadata so stale deltas don't compound across retries
+                kodo_pipeline_set "$event_id" "$domain" "feedback_delta" ""
+                kodo_pipeline_set "$event_id" "$domain" "feedback_wait_started" ""
+                kodo_pipeline_set "$event_id" "$domain" "feedback_rounds" "0"
 
                 # Re-dispatch engine for the now-pending event
                 local engine_script

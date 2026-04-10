@@ -547,7 +547,7 @@ ${schema_content}"
 
 Respond with ONLY valid JSON matching this schema: ${schema_content}"
             fi
-            raw_output=$(timeout "$timeout_s" codex exec --full-auto "$structured_prompt" </dev/null 2>"$llm_stderr_file") || {
+            raw_output=$(timeout "$timeout_s" codex exec --full-auto --skip-git-repo-check "$structured_prompt" </dev/null 2>"$llm_stderr_file") || {
                 local exit_code=$?
                 _llm_log_fail "$cli" "$repo" "$domain" "exit=$exit_code $(head -c 200 "$llm_stderr_file" 2>/dev/null)"
                 rm -f "$llm_stderr_file"; return 1
