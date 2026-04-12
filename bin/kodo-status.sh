@@ -50,7 +50,7 @@ for toml in "$KODO_HOME/repos/"*.toml; do
         WHERE repo = '$(kodo_sql_escape "$local_rid")' AND state = 'pending';")
     local_active=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
         WHERE repo = '$(kodo_sql_escape "$local_rid")'
-        AND state NOT IN ('pending','resolved','closed','deferred');")
+        AND state NOT IN ('pending','resolved','closed','deferred','published','reported');")
     local_deferred=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state
         WHERE repo = '$(kodo_sql_escape "$local_rid")' AND state = 'deferred';")
 
@@ -90,7 +90,7 @@ echo -e "${DIM}─────────────────────�
 
 local_active_events=$(kodo_sql "SELECT event_id, repo, domain, state, updated_at
     FROM pipeline_state
-    WHERE state NOT IN ('resolved', 'closed', 'published', 'reported')
+    WHERE state NOT IN ('pending', 'resolved', 'closed', 'deferred', 'published', 'reported')
     ORDER BY updated_at DESC LIMIT 10;")
 
 if [[ -z "$local_active_events" ]]; then

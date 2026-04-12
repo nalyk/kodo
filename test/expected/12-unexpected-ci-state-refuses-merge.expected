@@ -1,0 +1,7 @@
+=== pipeline_state ===
+evt-test-12-PullRequestEvent|dev|deferred
+=== merge_outcomes ===
+=== deferred_queue ===
+evt-test-12-PullRequestEvent|dev|CI failed or merge rejected for PR #1201
+=== community_log ===
+=== mock_calls ===

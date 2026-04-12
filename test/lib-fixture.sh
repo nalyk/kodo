@@ -127,7 +127,7 @@ fixture_dump() {
     echo "=== mock_calls ==="
     if [[ -f "$KODO_FIXTURE_HOME/mock-calls.log" ]]; then
         # Show only write actions (the interesting ones for verification)
-        grep -E '^(pr-merge|pr-create|pr-comment|pr-revert|issue-comment|issue-close|branch-push)' \
+        grep -E '^(pr-merge|pr-create|pr-comment|pr-revert|issue-comment|issue-close|issue-label|branch-push)' \
             "$KODO_FIXTURE_HOME/mock-calls.log" | sort || true
     fi
 }

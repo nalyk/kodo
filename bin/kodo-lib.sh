@@ -439,6 +439,52 @@ sys.exit(1)
     return 1
 }
 
+# Validate the subset of JSON Schema used by KODO schemas. This intentionally
+# covers required top-level fields, additionalProperties=false, primitive types,
+# enum, and numeric min/max constraints without adding a runtime dependency.
+kodo_validate_json_schema() {
+    local json="$1" schema_file="$2"
+    [[ -z "$schema_file" || ! -f "$schema_file" ]] && return 0
+
+    jq -e --argjson data "$json" '
+        def one_type_ok($value; $type):
+            if $type == "integer" then ($value | type) == "number" and (($value % 1) == 0)
+            elif $type == "number" then ($value | type) == "number"
+            elif $type == "string" then ($value | type) == "string"
+            elif $type == "boolean" then ($value | type) == "boolean"
+            elif $type == "array" then ($value | type) == "array"
+            elif $type == "object" then ($value | type) == "object"
+            elif $type == "null" then ($value | type) == "null"
+            else true end;
+        def type_ok($value; $type):
+            if ($type | type) == "array" then any($type[]; one_type_ok($value; .))
+            else one_type_ok($value; $type) end;
+        def schema_has_type($schema; $type):
+            if (($schema.type // null) | type) == "array" then any($schema.type[]; . == $type)
+            else ($schema.type // null) == $type end;
+        def valid($value; $schema):
+            type_ok($value; ($schema.type // "any"))
+            and (($schema.enum // null) == null or (($schema.enum | index($value)) != null))
+            and (($schema.minimum // null) == null or $value >= $schema.minimum)
+            and (($schema.maximum // null) == null or $value <= $schema.maximum)
+            and (
+                (schema_has_type($schema; "object") | not) or ($value | type) != "object" or
+                (($schema.required // []) as $required
+                 | ($schema.properties // {}) as $properties
+                 | all($required[]; $value | has(.))
+                 and (($schema.additionalProperties // true) == true
+                      or all(($value | keys_unsorted)[]; $properties | has(.)))
+                 and all($properties | keys_unsorted[]; . as $key |
+                    if ($value | has($key)) then valid($value[$key]; $properties[$key]) else true end))
+            )
+            and (
+                (schema_has_type($schema; "array") | not) or ($value | type) != "array" or
+                (($schema.items // null) == null or all($value[]; valid(.; $schema.items)))
+            );
+        valid($data; .)
+    ' "$schema_file" >/dev/null 2>&1
+}
+
 # ── Unified LLM Invocation ──────────────────────────────────
 # All 4 CLIs return structured JSON through one interface.
 # Claude: --json-schema + --output-format json → .structured_output
@@ -563,12 +609,19 @@ Respond with ONLY valid JSON matching this schema: ${schema_content}"
 
     rm -f "$llm_stderr_file"
 
+    [[ -z "$result" || "$result" == "null" ]] && return 1
+
+    if [[ -n "$schema_file" ]]; then
+        if ! kodo_validate_json_schema "$result" "$schema_file"; then
+            _llm_log_fail "$cli" "$repo" "$domain" "schema validation failed"
+            return 1
+        fi
+    fi
+
     # Log budget
     if [[ -n "$repo" && -n "$domain" ]]; then
         kodo_log_budget "$cli" "$repo" "$domain" "$tokens_in" "$tokens_out" "$cost"
     fi
-
-    [[ -z "$result" || "$result" == "null" ]] && return 1
 
     echo "$result"
     return 0

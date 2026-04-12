@@ -112,6 +112,9 @@ validate_transition() {
 
 apply_transition() {
     local event_id="$1" from="$2" to="$3" domain="$4"
+    local eid dom
+    eid="$(kodo_sql_escape "$event_id")"
+    dom="$(kodo_sql_escape "$domain")"
 
     # Validate
     if ! validate_transition "$from" "$to" "$domain"; then
@@ -134,37 +137,65 @@ apply_transition() {
         local payload
         payload="${KODO_TRANSITION_PAYLOAD:-}"
         [[ -z "$payload" ]] && payload='{}'
-        kodo_sql "INSERT OR IGNORE INTO pipeline_state (event_id, repo, domain, state, payload_json)
+        local rows_changed
+        rows_changed=$(sqlite3 -cmd ".timeout 5000" "$KODO_DB" "
+            INSERT OR IGNORE INTO pipeline_state (event_id, repo, domain, state, payload_json)
             VALUES (
-                '$(kodo_sql_escape "$event_id")',
+                '${eid}',
                 '$(kodo_sql_escape "${KODO_TRANSITION_REPO:-unknown}")',
-                '$(kodo_sql_escape "$domain")',
+                '${dom}',
                 'pending',
                 '$(kodo_sql_escape "$payload")'
-            );"
-        kodo_log "STATE: $event_id [$domain] * → pending"
+            );
+            SELECT changes();")
+        if [[ "${rows_changed:-0}" -gt 0 ]]; then
+            kodo_log "STATE: $event_id [$domain] * → pending"
+        else
+            kodo_log "STATE: $event_id [$domain] * → pending (already exists)"
+        fi
         return 0
     fi
 
     # Verify current state matches expected
     local current_state
     current_state=$(kodo_sql "SELECT state FROM pipeline_state
-        WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")';")
+        WHERE event_id = '${eid}' AND domain = '${dom}';")
 
     if [[ "$current_state" != "$from" ]]; then
         kodo_log "STATE MISMATCH: $event_id ($domain) expected '$from' but found '$current_state'"
         return 1
     fi
 
-    # Apply transition
+    # Apply transition atomically. Engines pass KODO_TRANSITION_OWNER_PID so a
+    # stale or unclaimed worker cannot advance state it no longer owns.
     local retry_increment=""
     if [[ "$from" == "deferred" && "$to" == "pending" ]]; then
         retry_increment=", retry_count = retry_count + 1"
     fi
+    local owner_clause=""
+    if [[ -n "${KODO_TRANSITION_OWNER_PID:-}" ]]; then
+        if [[ ! "$KODO_TRANSITION_OWNER_PID" =~ ^[0-9]+$ ]]; then
+            kodo_log "ERROR: invalid transition owner PID for $event_id ($domain)"
+            return 1
+        fi
+        owner_clause="AND processing_pid = ${KODO_TRANSITION_OWNER_PID}"
+    fi
 
-    kodo_sql "UPDATE pipeline_state
+    local rows_changed
+    rows_changed=$(sqlite3 -cmd ".timeout 5000" "$KODO_DB" "
+        UPDATE pipeline_state
         SET state = '$(kodo_sql_escape "$to")', updated_at = datetime('now') $retry_increment
-        WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = '$(kodo_sql_escape "$domain")';"
+        WHERE event_id = '${eid}' AND domain = '${dom}'
+        AND state = '$(kodo_sql_escape "$from")'
+        ${owner_clause};
+        SELECT changes();")
+
+    if [[ "${rows_changed:-0}" -le 0 ]]; then
+        current_state=$(kodo_sql "SELECT state FROM pipeline_state
+            WHERE event_id = '${eid}' AND domain = '${dom}';")
+        kodo_log "STATE LOST RACE: $event_id ($domain) expected '$from' but found '$current_state'"
+        return 1
+    fi
 
     kodo_log "STATE: $event_id [$domain] $from → $to"
     return 0

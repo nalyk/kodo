@@ -49,9 +49,10 @@ scan_pull_requests() {
     prs=$("$SCRIPT_DIR/kodo-git.sh" pr-list "$toml" 2>/dev/null) || { kodo_log "SCOUT: pr-list failed for $repo_id"; return 0; }
 
     echo "$prs" | jq -c '.[]' 2>/dev/null | while IFS= read -r pr; do
-        local pr_num pr_state
+        local pr_num pr_state updated_at
         pr_num=$(echo "$pr" | jq -r '.number')
         pr_state=$(echo "$pr" | jq -r '.state // "OPEN"' | tr '[:upper:]' '[:lower:]')
+        updated_at=$(echo "$pr" | jq -r '.updatedAt // .updated_at // .createdAt // .created_at // ""' 2>/dev/null)
 
         [[ "$pr_state" != "open" ]] && continue
 
@@ -61,7 +62,7 @@ scan_pull_requests() {
         [[ "$head_branch" == kodo/* ]] && continue
 
         local event_id
-        event_id="$(_event_key "$repo_id" "PullRequestEvent" "$pr_num")"
+        event_id="$(_event_key "$repo_id" "PullRequestEvent" "${pr_num}-${updated_at}")"
 
         if ! _event_exists "$event_id"; then
             _insert_event "$event_id" "$repo_id" "PullRequestEvent" "$pr"
@@ -75,17 +76,64 @@ scan_issues() {
     issues=$("$SCRIPT_DIR/kodo-git.sh" issue-list "$toml" 2>/dev/null) || { kodo_log "SCOUT: issue-list failed for $repo_id"; return 0; }
 
     echo "$issues" | jq -c '.[]' 2>/dev/null | while IFS= read -r issue; do
-        local issue_num issue_state
+        local issue_num issue_state updated_at
         issue_num=$(echo "$issue" | jq -r '.number')
         issue_state=$(echo "$issue" | jq -r '.state // "OPEN"' | tr '[:upper:]' '[:lower:]')
+        updated_at=$(echo "$issue" | jq -r '.updatedAt // .updated_at // .createdAt // .created_at // ""' 2>/dev/null)
 
         [[ "$issue_state" != "open" ]] && continue
 
         local event_id
-        event_id="$(_event_key "$repo_id" "IssuesEvent" "$issue_num")"
+        event_id="$(_event_key "$repo_id" "IssuesEvent" "${issue_num}-${updated_at}")"
 
         if ! _event_exists "$event_id"; then
             _insert_event "$event_id" "$repo_id" "IssuesEvent" "$issue"
+        fi
+
+        local comments
+        comments=$("$SCRIPT_DIR/kodo-git.sh" issue-comments "$toml" "$issue_num" 2>/dev/null) || comments="[]"
+        echo "$comments" | jq -c '.[]' 2>/dev/null | while IFS= read -r comment; do
+            local comment_id comment_updated comment_event_id comment_payload
+            comment_id=$(echo "$comment" | jq -r '.id // empty' 2>/dev/null)
+            comment_updated=$(echo "$comment" | jq -r '.updatedAt // .updated_at // .createdAt // .created_at // ""' 2>/dev/null)
+            [[ -z "$comment_id" ]] && continue
+            comment_event_id="$(_event_key "$repo_id" "IssueCommentEvent" "${issue_num}-${comment_id}-${comment_updated}")"
+            if ! _event_exists "$comment_event_id"; then
+                comment_payload=$(jq -nc --argjson issue "$issue" --argjson comment "$comment" '
+                    $comment + {
+                        issue_number: $issue.number,
+                        title: $issue.title,
+                        labels: ($issue.labels // []),
+                        number: $issue.number
+                    }')
+                _insert_event "$comment_event_id" "$repo_id" "IssueCommentEvent" "$comment_payload"
+            fi
+        done
+    done
+}
+
+scan_provider_events() {
+    local toml="$1" repo_id="$2"
+    local events
+    events=$("$SCRIPT_DIR/kodo-git.sh" event-list "$toml" 2>/dev/null) || return 0
+
+    echo "$events" | jq -c '.[]' 2>/dev/null | while IFS= read -r event; do
+        local provider_id event_type created_at event_id payload
+        provider_id=$(echo "$event" | jq -r '.id // empty' 2>/dev/null)
+        event_type=$(echo "$event" | jq -r '.type // empty' 2>/dev/null)
+        created_at=$(echo "$event" | jq -r '.created_at // .createdAt // ""' 2>/dev/null)
+        [[ -z "$provider_id" || -z "$event_type" ]] && continue
+
+        case "$event_type" in
+            PushEvent|ForkEvent|WatchEvent|DiscussionEvent) ;;
+            *) continue ;;
+        esac
+
+        event_id="$(_event_key "$repo_id" "$event_type" "${provider_id}-${created_at}")"
+        if ! _event_exists "$event_id"; then
+            payload=$(echo "$event" | jq -c '.payload + {author: .actor, provider_event_id: .id}' 2>/dev/null)
+            [[ -z "$payload" || "$payload" == "null" ]] && payload="$event"
+            _insert_event "$event_id" "$repo_id" "$event_type" "$payload"
         fi
     done
 }
@@ -154,6 +202,7 @@ main() {
         scan_issues "$toml" "$repo_id"
         scan_releases "$toml" "$repo_id"
         scan_milestones "$toml" "$repo_id"
+        scan_provider_events "$toml" "$repo_id"
     done
 
     local new_events

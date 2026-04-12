@@ -1,0 +1,1 @@
+{"score":65,"recommendation":"ballot","summary":"Generated PR needs ballot after verification","risks":[],"behavioral_assertions":[{"assertion":"Generated branch is checked before gates and scanning","covered_by_tests":true}]}

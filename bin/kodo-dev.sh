@@ -51,7 +51,7 @@ get_payload() {
 }
 
 transition() {
-    "$SCRIPT_DIR/kodo-transition.sh" "$EVENT_ID" "$1" "$2" "dev"
+    KODO_TRANSITION_OWNER_PID=$$ "$SCRIPT_DIR/kodo-transition.sh" "$EVENT_ID" "$1" "$2" "dev"
 }
 
 # Get PR number: pipeline metadata first (issue-driven), then payload (PR-driven)
@@ -61,9 +61,22 @@ _get_pr_num() {
     if [[ -z "$num" || "$num" == "null" ]]; then
         local payload
         payload="$(get_payload)"
-        num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+        local has_head_ref
+        has_head_ref=$(echo "$payload" | jq -r '.headRefName // empty' 2>/dev/null)
+        if [[ "$EVENT_ID" == *"PullRequestEvent"* || -n "$has_head_ref" ]]; then
+            num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+        fi
     fi
     echo "$num"
+}
+
+_get_pr_branch() {
+    local branch
+    branch=$(kodo_pipeline_get "$EVENT_ID" "dev" "pr_branch")
+    if [[ -z "$branch" || "$branch" == "null" ]]; then
+        branch=$(get_payload | jq -r '.headRefName // empty' 2>/dev/null)
+    fi
+    echo "$branch"
 }
 
 defer() {
@@ -741,7 +754,7 @@ Fix the failing tests. Do NOT change production code. Make minimal changes."
         # Ensure these dirs stay out of future commits via .gitignore
         if [[ -f .gitignore ]]; then
             for d in .serena .claude .codex .gemini .qwen; do
-                grep -qxF "$d/" .gitignore 2>/dev/null || true
+                grep -qxF "$d/" .gitignore 2>/dev/null || printf '%s\n' "$d/" >> .gitignore
             done
         fi
     ) || true
@@ -927,7 +940,7 @@ do_hard_gates() {
         if [[ -n "$work_dir" && -d "$work_dir" ]]; then
             # Fetch and checkout PR branch
             local pr_branch
-            pr_branch=$(get_payload | jq -r '.headRefName // empty' 2>/dev/null)
+            pr_branch=$(_get_pr_branch)
             if [[ -n "$pr_branch" ]]; then
                 (cd "$work_dir" && git fetch origin "$pr_branch" && git checkout "$pr_branch") 2>/dev/null || pr_branch=""
             fi
@@ -1205,7 +1218,7 @@ $feedback_text")"
             WHERE event_id = '$(kodo_sql_escape "$EVENT_ID")' AND classification = 'suggestion'
             AND author_is_bot = 1 AND suggestion_applied = 0;")
         for sa in $suggestion_authors; do
-            if echo "$trusted_bots" | grep -q "$sa"; then
+            if printf '%s\n' "$trusted_bots" | tr ',' '\n' | tr -d '[]"'\'' ' | grep -Fxq "$sa"; then
                 has_trusted_suggestion=true
                 break
             fi
@@ -1522,7 +1535,7 @@ do_scanning() {
             scan_dir=$("$SCRIPT_DIR/kodo-git.sh" repo-clone "$REPO_TOML" "" 2>/dev/null) || scan_dir=""
             if [[ -n "$scan_dir" && -d "$scan_dir" ]]; then
                 local pr_branch
-                pr_branch=$(get_payload | jq -r '.headRefName // empty' 2>/dev/null)
+                pr_branch=$(_get_pr_branch)
                 if [[ -n "$pr_branch" ]]; then
                     (cd "$scan_dir" && git fetch origin "$pr_branch" && git checkout "$pr_branch") 2>/dev/null || pr_branch=""
                 fi
@@ -1552,6 +1565,7 @@ do_scanning() {
     fi
 
     kodo_pipeline_set "$EVENT_ID" "dev" "scan_clean" "$scan_clean"
+    kodo_pipeline_set "$EVENT_ID" "dev" "confidence" "$confidence"
 
     if [[ "$scan_clean" != "true" && "$scan_findings" -gt 5 ]]; then
         defer "security scan: $scan_findings findings (critical)"
@@ -1812,6 +1826,10 @@ _check_ci_and_merge() {
                 ;;
             SUCCESS)
                 kodo_log "DEV: CI green ($ci_pass/$ci_total) — proceeding with $merge_type"
+                ;;
+            *)
+                kodo_log "DEV: unexpected CI state '$ci_state' — refusing merge"
+                return 2
                 ;;
         esac
     fi

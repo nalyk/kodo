@@ -18,6 +18,9 @@ _fixture_file() {
 # ── semgrep mock ────────────────────────────────────────────
 
 if [[ "$CLI_NAME" == "semgrep" ]]; then
+    if [[ -n "${KODO_HOME:-}" ]]; then
+        : > "$KODO_HOME/semgrep-ran"
+    fi
     fixture="$(_fixture_file semgrep)"
     if [[ -f "$fixture" ]]; then
         cat "$fixture"

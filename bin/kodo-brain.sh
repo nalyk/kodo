@@ -36,8 +36,14 @@ _is_external() {
     local payload="$1"
     local author_type
     author_type=$(echo "$payload" | jq -r '.author.type // .author.is_bot // ""' 2>/dev/null)
+    local association
+    association=$(echo "$payload" | jq -r '.authorAssociation // .author.association // .authorAssociationName // ""' 2>/dev/null)
     # Bots are not external contributors
-    [[ "$author_type" != "Bot" && "$author_type" != "true" ]]
+    [[ "$author_type" != "Bot" && "$author_type" != "true" ]] || return 1
+    case "$association" in
+        OWNER|MEMBER|COLLABORATOR) return 1 ;;
+    esac
+    return 0
 }
 
 # Classify event into domain(s)
@@ -124,6 +130,11 @@ dispatch_engine() {
     fi
 
     # Check if domain engine is enabled
+    if ! kodo_toml_bool "$toml" "$domain" "enabled" 2>/dev/null; then
+        kodo_log "BRAIN: $domain engine disabled for '$repo' — skipping"
+        return 2
+    fi
+
     local engine_script
     case "$domain" in
         dev) engine_script="$SCRIPT_DIR/kodo-dev.sh" ;;
@@ -133,8 +144,8 @@ dispatch_engine() {
     esac
 
     if [[ ! -x "$engine_script" ]]; then
-        kodo_log "BRAIN: engine $engine_script not executable — skipping"
-        return 0
+        kodo_log "BRAIN: engine $engine_script not executable — keeping event pending"
+        return 1
     fi
 
     # Create pipeline state (with payload for engines to read)
@@ -201,7 +212,13 @@ main() {
                     dispatch_ok=false
                     break 2
                 fi
-                dispatch_engine "$domain" "$event_id" "$repo" "$payload" && active_count=$((active_count + 1)) || dispatch_ok=false
+                local dispatch_rc=0
+                dispatch_engine "$domain" "$event_id" "$repo" "$payload" || dispatch_rc=$?
+                case "$dispatch_rc" in
+                    0) active_count=$((active_count + 1)) ;;
+                    2) ;;
+                    *) dispatch_ok=false ;;
+                esac
             done
 
             # Only remove from pending if all dispatches succeeded
@@ -268,6 +285,10 @@ ${monitoring_stalled}"
 
             local toml="$KODO_HOME/repos/${repo}.toml"
             [[ ! -f "$toml" ]] && continue
+            if ! kodo_toml_bool "$toml" "$domain" "enabled" 2>/dev/null; then
+                kodo_log "BRAIN: $domain engine disabled for '$repo' — skipping stalled $event_id"
+                continue
+            fi
 
             local engine_script
             case "$domain" in
@@ -321,6 +342,10 @@ ${monitoring_stalled}"
 
             local toml="$KODO_HOME/repos/${repo}.toml"
             [[ ! -f "$toml" ]] && continue
+            if ! kodo_toml_bool "$toml" "$domain" "enabled" 2>/dev/null; then
+                kodo_log "BRAIN: $domain engine disabled for '$repo' — skipping deferred $event_id"
+                continue
+            fi
 
             export KODO_TRANSITION_REPO="$repo"
 

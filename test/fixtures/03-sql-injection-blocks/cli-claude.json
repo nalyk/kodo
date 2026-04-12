@@ -1,1 +1,1 @@
-{"score":80,"summary":"Code compiles but security review pending","risks":[{"severity":"high","description":"Raw SQL concatenation detected"}]}
+{"score":80,"recommendation":"ballot","summary":"Code compiles but security review pending","risks":[{"severity":"high","description":"Raw SQL concatenation detected"}],"behavioral_assertions":[{"assertion":"Raw query support accepts user-provided SQL fragments","covered_by_tests":false}]}

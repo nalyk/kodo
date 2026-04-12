@@ -311,7 +311,7 @@ done
 # ── 11. Residual old-code check ───────────────────────────────
 header "CODE CONSISTENCY CHECK"
 
-if grep -q 'echo no-tests' /home/ubuntu/gits/kodo-dev/bin/kodo-dev.sh 2>/dev/null | grep -v '^#' | grep -v '_is_placeholder_cmd' | grep -qv 'Match common'; then
+if grep 'echo no-tests' /home/ubuntu/gits/kodo-dev/bin/kodo-dev.sh 2>/dev/null | grep -v '^#' | grep -v '_is_placeholder_cmd' | grep -qv 'Match common'; then
     warn "Residual hardcoded 'echo no-tests' check found in kodo-dev.sh — should use _is_placeholder_cmd"
 else
     pass "No residual hardcoded placeholder checks — all use _is_placeholder_cmd"

@@ -1,0 +1,7 @@
+diff --git a/src/app.js b/src/app.js
+index 1111111..2222222 100644
+--- a/src/app.js
++++ b/src/app.js
+@@ -1 +1 @@
+-old
++new

@@ -29,11 +29,16 @@ _parse_args() {
     done
 
     if [[ -z "$INPUT" || "$INPUT" != *"/"* ]]; then
-        echo "Usage: kodo-add.sh <owner/repo> [--provider github] [--dry-run]" >&2
+        echo "Usage: kodo-add.sh <owner/repo> [--provider github|gitlab] [--dry-run]" >&2
         echo "  Example: kodo-add.sh acme/api" >&2
         echo "  Example: kodo-add.sh acme/api --dry-run" >&2
         exit 1
     fi
+
+    case "$PROVIDER" in
+        github|gitlab) ;;
+        *) echo "Unsupported provider: $PROVIDER (expected github or gitlab)" >&2; exit 1 ;;
+    esac
 
     OWNER="${INPUT%%/*}"
     REPO="${INPUT#*/}"
@@ -520,6 +525,8 @@ enabled = true
 
 [dev]
 enabled = true
+issue_intent_gate = true
+intent_window_hours = 24
 
 [mkt]
 enabled = true
@@ -596,6 +603,8 @@ lint_optional = false
 allow_no_ci = false
 max_diff_lines = 500
 auto_merge_deps = true
+issue_intent_gate = true
+intent_window_hours = 24
 semver_release = true
 await_bot_feedback = true
 feedback_window_minutes = 10
@@ -655,23 +664,47 @@ TOML
 
     local validation_ok=true
 
-    if ! gh auth status >/dev/null 2>&1; then
-        echo "  FAIL: gh not authenticated"
-        validation_ok=false
-    fi
+    case "$PROVIDER" in
+        github)
+            if ! gh auth status >/dev/null 2>&1; then
+                echo "  FAIL: gh not authenticated"
+                validation_ok=false
+            fi
 
-    if ! gh api "repos/${OWNER}/${REPO}" >/dev/null 2>&1; then
-        echo "  FAIL: cannot access ${OWNER}/${REPO}"
-        validation_ok=false
-    else
-        echo "  OK: repo accessible"
-    fi
+            if ! gh api "repos/${OWNER}/${REPO}" >/dev/null 2>&1; then
+                echo "  FAIL: cannot access ${OWNER}/${REPO}"
+                validation_ok=false
+            else
+                echo "  OK: repo accessible"
+            fi
 
-    if gh api "repos/${OWNER}/${REPO}/branches/${branch:-main}" >/dev/null 2>&1; then
-        echo "  OK: branch '${branch:-main}' exists"
-    else
-        echo "  WARN: branch '${branch:-main}' not found — may need adjustment"
-    fi
+            if gh api "repos/${OWNER}/${REPO}/branches/${branch:-main}" >/dev/null 2>&1; then
+                echo "  OK: branch '${branch:-main}' exists"
+            else
+                echo "  WARN: branch '${branch:-main}' not found — may need adjustment"
+            fi
+            ;;
+        gitlab)
+            if ! glab auth status >/dev/null 2>&1; then
+                echo "  FAIL: glab not authenticated"
+                validation_ok=false
+            fi
+
+            local project_id
+            project_id=$(echo "$repo_info" | jq -r '.id // empty' 2>/dev/null) || project_id=""
+            if [[ -z "$project_id" ]]; then
+                echo "  FAIL: cannot access ${OWNER}/${REPO}"
+                validation_ok=false
+            else
+                echo "  OK: repo accessible"
+                if glab api "projects/${project_id}/repository/branches/${branch:-main}" >/dev/null 2>&1; then
+                    echo "  OK: branch '${branch:-main}' exists"
+                else
+                    echo "  WARN: branch '${branch:-main}' not found — may need adjustment"
+                fi
+            fi
+            ;;
+    esac
 
     echo "  OK: mode = shadow (safe)"
 

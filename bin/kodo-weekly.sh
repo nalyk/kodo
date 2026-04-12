@@ -76,7 +76,7 @@ do_health_check() {
     # Pipeline stats
     local pending in_progress deferred
     pending=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state WHERE state = 'pending';")
-    in_progress=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state WHERE state NOT IN ('pending','resolved','closed','deferred');")
+    in_progress=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state WHERE state NOT IN ('pending','resolved','closed','deferred','published','reported');")
     deferred=$(kodo_sql "SELECT COUNT(*) FROM pipeline_state WHERE state = 'deferred';")
     echo "  pending events: $pending"
     echo "  in-progress: $in_progress"

@@ -14,6 +14,48 @@ source "$SCRIPT_DIR/kodo-lib.sh"
 
 kodo_init_db
 
+_pm_enabled() {
+    local toml="$1"
+    kodo_toml_bool "$toml" "pm" "enabled" 2>/dev/null
+}
+
+_pm_feature_enabled() {
+    local toml="$1" feature="$2"
+    _pm_enabled "$toml" && kodo_toml_bool "$toml" "pm" "$feature" 2>/dev/null
+}
+
+_pm_event_schema_file() {
+    local schema_file
+    schema_file=$(mktemp)
+    cat > "$schema_file" <<'JSON'
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "KODO PM Event Evaluation",
+  "type": "object",
+  "required": ["priority", "summary", "feasibility", "effort", "risks", "recommendation"],
+  "properties": {
+    "priority": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+    "summary": { "type": "string" },
+    "feasibility": { "type": "string", "enum": ["low", "medium", "high"] },
+    "effort": { "type": "string", "enum": ["small", "medium", "large", "unknown"] },
+    "risks": { "type": "array", "items": { "type": "string" } },
+    "recommendation": { "type": "string", "enum": ["accept", "defer", "reject", "needs_more_info"] },
+    "milestone_progress": {
+      "type": ["object", "null"],
+      "properties": {
+        "progress_pct": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "at_risk": { "type": "boolean" },
+        "blockers": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
+JSON
+    echo "$schema_file"
+}
+
 # ── Daily Triage Mode ────────────────────────────────────────
 
 do_daily_triage() {
@@ -23,7 +65,7 @@ do_daily_triage() {
         [[ "$(basename "$toml")" == "_template.toml" ]] && continue
         [[ ! -f "$toml" ]] && continue
 
-        if ! kodo_toml_bool "$toml" "daily_triage"; then
+        if ! _pm_feature_enabled "$toml" "daily_triage"; then
             continue
         fi
 
@@ -59,7 +101,7 @@ do_daily_triage() {
 For each issue: suggest priority (P0-P3), suggest labels, flag if duplicate, flag if stale (>30 days no activity).
 
 Issues:
-$(echo "$issues" | jq -c '.[] | {number, title, labels: [.labels[]?.name], created: .createdAt, comments: (.comments // 0)}' 2>/dev/null)")"
+$(echo "$issues" | jq -c '.[] | {number, title, labels: [.labels[]?.name], created: .createdAt, updated: .updatedAt, comments: (.comments // 0)}' 2>/dev/null)")"
 
         local triage_output
         local triage_cli="qwen"
@@ -95,9 +137,8 @@ _KODO PM triage_"
             fi
 
             # Apply suggested labels
-            local labels
-            labels=$(echo "$suggestion" | jq -r '.suggested_labels[]' 2>/dev/null) || true
-            for label in $labels; do
+            echo "$suggestion" | jq -r '.suggested_labels[]?' 2>/dev/null | while IFS= read -r label; do
+                [[ -z "$label" ]] && continue
                 "$SCRIPT_DIR/kodo-git.sh" issue-label "$toml" "$issue_num" "$label" 2>/dev/null || true
             done
         done
@@ -122,7 +163,7 @@ do_weekly_report() {
 
     kodo_log "PM: generating weekly report for $repo_id"
 
-    if ! kodo_toml_bool "$toml" "weekly_report"; then
+    if ! _pm_feature_enabled "$toml" "weekly_report"; then
         return
     fi
 
@@ -184,14 +225,11 @@ Analyze: velocity trends, priority recommendations, roadmap status, technical de
     kodo_sql "INSERT INTO pm_artifacts (repo, type, data_json)
         VALUES ('$(kodo_sql_escape "$repo_id")', 'weekly', '$(kodo_sql_escape "$report")');"
 
-    # Post report as GitHub issue (if weekly_report enabled)
-    if kodo_toml_bool "$toml" "pm" "weekly_report"; then
-        local issue_title
-        issue_title="[kodo-pm] Weekly Report — $(date +%Y-%m-%d)"
-        "$SCRIPT_DIR/kodo-git.sh" issue-create "$toml" "$issue_title" "$report_body" 2>/dev/null || {
-            kodo_log "PM: weekly issue creation failed for $repo_id (shadow mode or error)"
-        }
-    fi
+    local issue_title
+    issue_title="[kodo-pm] Weekly Report — $(date +%Y-%m-%d)"
+    "$SCRIPT_DIR/kodo-git.sh" issue-create "$toml" "$issue_title" "$report_body" 2>/dev/null || {
+        kodo_log "PM: weekly issue creation failed for $repo_id (shadow mode or error)"
+    }
 
     # Send Telegram digest if enabled
     if kodo_toml_bool "$toml" "pm" "telegram_digest"; then
@@ -225,9 +263,24 @@ do_event() {
     state=$(kodo_sql "SELECT state FROM pipeline_state
         WHERE event_id = '$(kodo_sql_escape "$event_id")' AND domain = 'pm';")
 
+    if ! _pm_feature_enabled "$toml" "feature_evaluation"; then
+        kodo_log "PM: feature evaluation disabled for $repo_id — skipping $event_id"
+        case "$state" in
+            pending)
+                KODO_TRANSITION_OWNER_PID=$$ "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "pending" "analyzing" "pm"
+                KODO_TRANSITION_OWNER_PID=$$ "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "reported" "pm"
+                ;;
+            analyzing)
+                KODO_TRANSITION_OWNER_PID=$$ "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "reported" "pm"
+                ;;
+            *) ;;
+        esac
+        return
+    fi
+
     case "$state" in
         pending)
-            "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "pending" "analyzing" "pm"
+            KODO_TRANSITION_OWNER_PID=$$ "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "pending" "analyzing" "pm"
 
             # Get actual event payload for context
             local payload
@@ -261,12 +314,15 @@ If this is a milestone, summarize progress and flag risks.")"
 
             if [[ -z "$eval_cli" ]]; then
                 kodo_log "PM: no CLI available for evaluation"
-                "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "deferred" "pm"
+                KODO_TRANSITION_OWNER_PID=$$ "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "deferred" "pm"
                 return
             fi
 
+            local eval_schema
+            eval_schema=$(_pm_event_schema_file)
+
             result=$(kodo_invoke_llm "$eval_cli" "$prompt" \
-                --schema "$KODO_HOME/schemas/pm-report.schema.json" \
+                --schema "$eval_schema" \
                 --timeout 120 \
                 --repo "$repo_id" \
                 --domain "pm") || result=""
@@ -278,7 +334,7 @@ If this is a milestone, summarize progress and flag risks.")"
                     if kodo_cli_available "$cli"; then
                         kodo_log "PM: $eval_cli failed, falling back to $cli"
                         result=$(kodo_invoke_llm "$cli" "$prompt" \
-                            --schema "$KODO_HOME/schemas/pm-report.schema.json" \
+                            --schema "$eval_schema" \
                             --timeout 120 \
                             --repo "$repo_id" \
                             --domain "pm") || result=""
@@ -288,15 +344,17 @@ If this is a milestone, summarize progress and flag risks.")"
             fi
 
             if [[ -z "$result" ]]; then
+                rm -f "$eval_schema"
                 kodo_log "PM: all CLIs failed for $event_id"
-                "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "deferred" "pm"
+                KODO_TRANSITION_OWNER_PID=$$ "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "deferred" "pm"
                 return
             fi
+            rm -f "$eval_schema"
 
             kodo_sql "INSERT INTO pm_artifacts (repo, type, data_json)
                 VALUES ('$(kodo_sql_escape "$repo_id")', 'evaluation', '$(kodo_sql_escape "$result")');"
 
-            "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "reported" "pm"
+            KODO_TRANSITION_OWNER_PID=$$ "$SCRIPT_DIR/kodo-transition.sh" "$event_id" "analyzing" "reported" "pm"
             kodo_log "PM: event $event_id analyzed for $repo_id (cli: $eval_cli)"
             ;;
         analyzing)

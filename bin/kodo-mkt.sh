@@ -45,7 +45,7 @@ get_payload() {
 }
 
 transition() {
-    "$SCRIPT_DIR/kodo-transition.sh" "$EVENT_ID" "$1" "$2" "mkt"
+    KODO_TRANSITION_OWNER_PID=$$ "$SCRIPT_DIR/kodo-transition.sh" "$EVENT_ID" "$1" "$2" "mkt"
 }
 
 # Check if action already performed (dedup)
@@ -63,6 +63,64 @@ _record_action() {
     local author="$1" action="$2"
     kodo_sql "INSERT OR IGNORE INTO community_log (repo, author, action)
         VALUES ('$(kodo_sql_escape "$REPO_ID")', '$(kodo_sql_escape "$author")', '$(kodo_sql_escape "$action")');"
+}
+
+_mkt_enabled() {
+    kodo_toml_bool "$REPO_TOML" "mkt" "enabled" 2>/dev/null
+}
+
+_mkt_feature_enabled() {
+    local feature="$1"
+    kodo_toml_bool "$REPO_TOML" "mkt" "$feature" 2>/dev/null
+}
+
+_publish_without_action() {
+    local state="$1" reason="$2"
+    kodo_log "MKT: $reason — skipping $EVENT_ID"
+    case "$state" in
+        pending)
+            transition "pending" "drafting"
+            transition "drafting" "published"
+            ;;
+        drafting)
+            transition "drafting" "published"
+            ;;
+        reviewing)
+            transition "reviewing" "published"
+            ;;
+        *) ;;
+    esac
+}
+
+_event_type() {
+    local payload="$1" event_type
+    event_type=$(echo "$payload" | jq -r '.event_type // .eventType // .type // empty' 2>/dev/null) || event_type=""
+    if [[ -n "$event_type" ]]; then
+        echo "$event_type"
+        return
+    fi
+
+    if echo "$payload" | jq -e 'has("tagName") or has("tag_name")' >/dev/null 2>&1; then
+        echo "ReleaseEvent"
+    elif echo "$payload" | jq -e 'has("headRefName") or has("source_branch") or has("target_branch")' >/dev/null 2>&1; then
+        echo "PullRequestEvent"
+    elif echo "$payload" | jq -e 'has("dueOn") or has("due_on") or has("openIssues") or has("open_issues")' >/dev/null 2>&1; then
+        echo "MilestoneEvent"
+    elif [[ "$EVENT_ID" == *"ReleaseEvent"* ]]; then
+        echo "ReleaseEvent"
+    elif [[ "$EVENT_ID" == *"IssuesEvent"* ]]; then
+        echo "IssuesEvent"
+    elif [[ "$EVENT_ID" == *"IssueCommentEvent"* ]]; then
+        echo "IssueCommentEvent"
+    elif [[ "$EVENT_ID" == *"ForkEvent"* ]]; then
+        echo "ForkEvent"
+    elif [[ "$EVENT_ID" == *"WatchEvent"* ]]; then
+        echo "WatchEvent"
+    elif [[ "$EVENT_ID" == *"DiscussionEvent"* ]]; then
+        echo "DiscussionEvent"
+    else
+        echo "PullRequestEvent"
+    fi
 }
 
 # Load voice profile if exists
@@ -86,6 +144,12 @@ generate_welcome() {
     local author pr_num
     author=$(echo "$payload" | jq -r '.author.login // .author // "contributor"' 2>/dev/null)
     pr_num=$(echo "$payload" | jq -r '.number // empty' 2>/dev/null)
+
+    if ! _mkt_feature_enabled "welcome_new_contributors"; then
+        kodo_log "MKT: welcome_new_contributors disabled for $REPO_ID"
+        transition "drafting" "published"
+        return
+    fi
 
     # Dedup check
     if _already_done "$author" "welcomed"; then
@@ -125,15 +189,22 @@ Guidelines:
     kodo_log_budget "gemini" "$REPO_ID" "mkt" 0 0 0.0
 
     # Post welcome comment on the correct API surface (PR vs Issue)
-    if [[ -n "$pr_num" ]]; then
-        if [[ "$EVENT_ID" == *"IssuesEvent"* || "$EVENT_ID" == *"IssueCommentEvent"* ]]; then
-            "$SCRIPT_DIR/kodo-git.sh" issue-comment "$REPO_TOML" "$pr_num" "$message" 2>/dev/null || true
-        else
-            "$SCRIPT_DIR/kodo-git.sh" pr-comment "$REPO_TOML" "$pr_num" "$message" 2>/dev/null || true
-        fi
+    if [[ -z "$pr_num" ]]; then
+        kodo_log "MKT: no issue/PR number in payload for welcome"
+        transition "drafting" "published"
+        return
     fi
 
-    _record_action "$author" "welcomed"
+    local posted=false
+    if [[ "$EVENT_ID" == *"IssuesEvent"* || "$EVENT_ID" == *"IssueCommentEvent"* ]]; then
+        "$SCRIPT_DIR/kodo-git.sh" issue-comment "$REPO_TOML" "$pr_num" "$message" 2>/dev/null && posted=true
+    else
+        "$SCRIPT_DIR/kodo-git.sh" pr-comment "$REPO_TOML" "$pr_num" "$message" 2>/dev/null && posted=true
+    fi
+
+    if [[ "$posted" == "true" || "$(kodo_toml_get "$REPO_TOML" "repo" "mode" 2>/dev/null)" == "shadow" ]]; then
+        _record_action "$author" "welcomed"
+    fi
     transition "drafting" "published"
     kodo_log "MKT: welcomed $author on $REPO_ID"
 }
@@ -142,6 +213,12 @@ generate_changelog() {
     local payload="$1"
     local tag
     tag=$(echo "$payload" | jq -r '.tagName // .tag_name // empty' 2>/dev/null)
+
+    if ! _mkt_feature_enabled "generate_changelogs"; then
+        kodo_log "MKT: generate_changelogs disabled for $REPO_ID"
+        transition "drafting" "published"
+        return
+    fi
 
     if [[ -z "$tag" ]]; then
         transition "drafting" "deferred"
@@ -187,14 +264,15 @@ Guidelines:
     kodo_log_budget "gemini" "$REPO_ID" "mkt" 0 0 0.0
 
     # Quality review for releases (Claude, if available and enabled)
-    if kodo_toml_bool "$REPO_TOML" "mkt" "generate_changelogs" && kodo_cli_available claude && kodo_check_budget "claude"; then
+    if kodo_cli_available claude && kodo_check_budget "claude"; then
         local reviewed
-        reviewed=$(kodo_invoke_llm claude "Review and improve this changelog for accuracy and tone. Keep the same structure:
+        reviewed=$(timeout 60 claude -p "Review and improve this changelog for accuracy and tone. Return only markdown, with no preamble.
 
-$changelog" --timeout 60 --repo "$REPO_ID" --domain "mkt") || reviewed=""
+$changelog" </dev/null 2>/dev/null) || reviewed=""
         if [[ -n "$reviewed" ]]; then
             changelog="$reviewed"
         fi
+        kodo_log_budget "claude" "$REPO_ID" "mkt" 0 0 0.0
         transition "drafting" "reviewing"
     else
         # Skip review, go straight to publishing after release-edit
@@ -234,6 +312,11 @@ main() {
 
     kodo_log "MKT: processing $EVENT_ID (state: $state)"
 
+    if ! _mkt_enabled; then
+        _publish_without_action "$state" "[mkt].enabled is false"
+        return
+    fi
+
     case "$state" in
         pending)
             transition "pending" "drafting"
@@ -242,21 +325,9 @@ main() {
             payload="$(get_payload)"
             [[ -z "$payload" ]] && payload='{}'
 
-            # Determine content type from event_id pattern
-            local event_type="PullRequestEvent"
-            if [[ "$EVENT_ID" == *"ReleaseEvent"* ]]; then
-                event_type="ReleaseEvent"
-            elif [[ "$EVENT_ID" == *"IssuesEvent"* ]]; then
-                event_type="IssuesEvent"
-            elif [[ "$EVENT_ID" == *"IssueCommentEvent"* ]]; then
-                event_type="IssueCommentEvent"
-            elif [[ "$EVENT_ID" == *"ForkEvent"* ]]; then
-                event_type="ForkEvent"
-            elif [[ "$EVENT_ID" == *"WatchEvent"* ]]; then
-                event_type="WatchEvent"
-            elif [[ "$EVENT_ID" == *"DiscussionEvent"* ]]; then
-                event_type="DiscussionEvent"
-            fi
+            # Prefer provider payload shape; fall back to scout event id encoding.
+            local event_type
+            event_type="$(_event_type "$payload")"
 
             case "$event_type" in
                 PullRequestEvent|IssueCommentEvent|IssuesEvent)
@@ -279,20 +350,8 @@ main() {
             payload="$(get_payload)"
             [[ -z "$payload" ]] && payload='{}'
 
-            local event_type="PullRequestEvent"
-            if [[ "$EVENT_ID" == *"ReleaseEvent"* ]]; then
-                event_type="ReleaseEvent"
-            elif [[ "$EVENT_ID" == *"IssuesEvent"* ]]; then
-                event_type="IssuesEvent"
-            elif [[ "$EVENT_ID" == *"IssueCommentEvent"* ]]; then
-                event_type="IssueCommentEvent"
-            elif [[ "$EVENT_ID" == *"ForkEvent"* ]]; then
-                event_type="ForkEvent"
-            elif [[ "$EVENT_ID" == *"WatchEvent"* ]]; then
-                event_type="WatchEvent"
-            elif [[ "$EVENT_ID" == *"DiscussionEvent"* ]]; then
-                event_type="DiscussionEvent"
-            fi
+            local event_type
+            event_type="$(_event_type "$payload")"
 
             kodo_log "MKT: resuming $EVENT_ID in drafting (re-generating content)"
             case "$event_type" in

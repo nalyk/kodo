@@ -50,6 +50,9 @@ _mock_repo_clone() {
         # Create requested branch if different from main
         if [[ -n "$branch" && "$branch" != "main" ]]; then
             git checkout -q -b "$branch" 2>/dev/null || true
+            echo "$branch" > branch-marker
+            git add branch-marker
+            git commit -q -m "branch marker for $branch" --no-verify 2>/dev/null || true
         fi
         # Read payload to pre-create the PR branch if it exists
         # This ensures `git fetch origin <headRefName> && git checkout <headRefName>` works
@@ -57,6 +60,9 @@ _mock_repo_clone() {
         head_ref="${KODO_FIXTURE_PR_BRANCH:-}"
         if [[ -n "$head_ref" && "$head_ref" != "$branch" ]]; then
             git checkout -q -b "$head_ref" 2>/dev/null || true
+            echo "$head_ref" > branch-marker
+            git add branch-marker
+            git commit -q -m "branch marker for $head_ref" --no-verify 2>/dev/null || true
         fi
         # Update self-remote refs
         git fetch -q origin 2>/dev/null || true

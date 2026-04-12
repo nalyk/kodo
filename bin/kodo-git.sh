@@ -41,7 +41,7 @@ _guard_write() {
 
 _gh_pr_list() {
     local slug="$1"
-    gh pr list --repo "$slug" --json number,title,state,headRefName,author,labels,createdAt,updatedAt --limit 50
+    gh pr list --repo "$slug" --json number,title,state,headRefName,author,authorAssociation,labels,createdAt,updatedAt --limit 50
 }
 
 _gh_pr_comment() {
@@ -157,6 +157,23 @@ _gh_discussion_create() {
 _gh_milestone_list() {
     local slug="$1"
     gh api "repos/$slug/milestones" --jq '.[] | {number, title, open_issues, closed_issues, due_on, state}'
+}
+
+_gh_event_list() {
+    local slug="$1"
+    gh api "repos/$slug/events?per_page=50" --jq '[.[] | {
+        id,
+        type,
+        created_at,
+        actor: {login: .actor.login, type: "User"},
+        payload: .payload
+    }]'
+}
+
+_gh_issue_comments() {
+    local slug="$1" issue_num="$2"
+    gh api "repos/${slug}/issues/${issue_num}/comments?per_page=50" --jq \
+        '[.[] | {id: (.id | tostring), body, author: {login: .user.login, type: .user.type}, createdAt: .created_at, updatedAt: .updated_at}]'
 }
 
 _gh_compare() {
@@ -617,6 +634,19 @@ This revert was triggered because main-branch CI checks failed within the monito
     # Wait for CI to start before merging the revert
     sleep 60
 
+    local revert_checks revert_state
+    revert_checks=$(_gh_pr_checks "$slug" "$revert_pr_num" 2>/dev/null) || {
+        kodo_log "ERROR: failed to check revert PR #$revert_pr_num CI"
+        rm -rf "$work_dir"
+        return 1
+    }
+    revert_state=$(echo "$revert_checks" | jq -r '.state // "UNKNOWN"' 2>/dev/null)
+    if [[ "$revert_state" != "SUCCESS" && "$revert_state" != "NO_CHECKS" ]]; then
+        kodo_log "ERROR: revert PR #$revert_pr_num CI not green ($revert_state)"
+        rm -rf "$work_dir"
+        return 1
+    fi
+
     _gh_pr_merge "$slug" "$revert_pr_num" 2>/dev/null || {
         kodo_log "ERROR: failed to merge revert PR #$revert_pr_num"
         rm -rf "$work_dir"
@@ -739,6 +769,29 @@ _glab_milestone_list() {
         2>/dev/null || echo '[]'
 }
 
+_glab_event_list() {
+    local slug="$1"
+    local proj_id
+    proj_id=$(_glab_project_id "$slug")
+    glab api "projects/${proj_id}/events?per_page=50" 2>/dev/null \
+        | jq -c '[.[] | {
+            id: (.id | tostring),
+            type: (if .action_name == "pushed to" then "PushEvent" else "GitLabEvent" end),
+            created_at: .created_at,
+            actor: {login: .author.username, type: (if .author.bot then "Bot" else "User" end)},
+            payload: .
+        }]' 2>/dev/null || echo '[]'
+}
+
+_glab_issue_comments() {
+    local slug="$1" issue_iid="$2"
+    local proj_id
+    proj_id=$(_glab_project_id "$slug")
+    glab api "projects/${proj_id}/issues/${issue_iid}/notes?per_page=50" 2>/dev/null \
+        | jq -c '[.[] | {id: (.id | tostring), body, author: {login: .author.username, type: (if .author.bot then "Bot" else "User" end)}, createdAt: .created_at, updatedAt: .updated_at}]' \
+        2>/dev/null || echo '[]'
+}
+
 _glab_compare() {
     local slug="$1" base="$2" head="$3"
     local proj_id
@@ -798,6 +851,19 @@ This revert was triggered because main-branch CI checks failed within the monito
 
     # Wait for CI to start before merging the revert
     sleep 60
+
+    local revert_checks revert_state
+    revert_checks=$(_glab_pr_checks "$slug" "$revert_mr_iid" 2>/dev/null) || {
+        kodo_log "ERROR: failed to check revert MR !$revert_mr_iid CI"
+        rm -rf "$work_dir"
+        return 1
+    }
+    revert_state=$(echo "$revert_checks" | jq -r '.state // "UNKNOWN"' 2>/dev/null)
+    if [[ "$revert_state" != "SUCCESS" && "$revert_state" != "NO_CHECKS" ]]; then
+        kodo_log "ERROR: revert MR !$revert_mr_iid CI not green ($revert_state)"
+        rm -rf "$work_dir"
+        return 1
+    fi
 
     _glab_pr_merge "$slug" "$revert_mr_iid" 2>/dev/null || {
         kodo_log "ERROR: failed to merge revert MR !$revert_mr_iid"
@@ -867,10 +933,10 @@ main() {
     if [[ "$action" == "provider-capabilities" ]]; then
         case "$provider" in
             github)
-                echo '["pr-list","pr-comment","pr-merge","pr-checks","pr-diff","issue-list","issue-comment","issue-close","issue-label","release-get","release-edit","release-list","user-info","discussion-create","milestone-list","compare","repo-info","issue-create","repo-clone","pr-create","issue-get","branch-push","pr-mergeable","pr-rebase","pr-reviews","pr-review-comments","pr-apply-suggestion","pr-merge-sha","commit-checks","pr-revert","issue-labels-get","comment-reactions"]'
+                echo '["pr-list","pr-comment","pr-merge","pr-checks","pr-diff","issue-list","issue-comment","issue-close","issue-label","release-get","release-edit","release-list","user-info","discussion-create","milestone-list","event-list","issue-comments","compare","repo-info","issue-create","repo-clone","pr-create","issue-get","branch-push","pr-mergeable","pr-rebase","pr-reviews","pr-review-comments","pr-apply-suggestion","pr-merge-sha","commit-checks","pr-revert","issue-labels-get","comment-reactions"]'
                 ;;
             gitlab)
-                echo '["pr-list","pr-comment","pr-merge","pr-checks","pr-diff","issue-list","issue-comment","issue-close","issue-label","release-get","release-edit","release-list","user-info","discussion-create","milestone-list","compare","repo-info","issue-create","repo-clone","pr-create","issue-get","branch-push","pr-mergeable","pr-rebase","pr-reviews","pr-review-comments","pr-apply-suggestion","pr-merge-sha","commit-checks","pr-revert","issue-labels-get","comment-reactions"]'
+                echo '["pr-list","pr-comment","pr-merge","pr-checks","pr-diff","issue-list","issue-comment","issue-close","issue-label","release-get","release-edit","release-list","user-info","discussion-create","milestone-list","event-list","issue-comments","compare","repo-info","issue-create","repo-clone","pr-create","issue-get","branch-push","pr-mergeable","pr-rebase","pr-reviews","pr-review-comments","pr-apply-suggestion","pr-merge-sha","commit-checks","pr-revert","issue-labels-get","comment-reactions"]'
                 ;;
             *)
                 echo '[]'
@@ -897,6 +963,8 @@ main() {
                 user-info)          _gh_user_info "$@" ;;
                 discussion-create)  _gh_discussion_create "$slug" "$@" ;;
                 milestone-list)     _gh_milestone_list "$slug" ;;
+                event-list)         _gh_event_list "$slug" ;;
+                issue-comments)     _gh_issue_comments "$slug" "$@" ;;
                 compare)            _gh_compare "$slug" "$@" ;;
                 repo-info)          gh api "repos/$slug" 2>/dev/null || echo "{}" ;;
                 issue-create)       gh issue create --repo "$slug" --title "$1" --body "$2" 2>/dev/null ;;
@@ -934,6 +1002,8 @@ main() {
                 user-info)           _glab_user_info "$@" ;;
                 discussion-create)   _glab_discussion_create "$slug" "$@" ;;
                 milestone-list)      _glab_milestone_list "$slug" ;;
+                event-list)          _glab_event_list "$slug" ;;
+                issue-comments)      _glab_issue_comments "$slug" "$@" ;;
                 compare)             _glab_compare "$slug" "$@" ;;
                 repo-info)           glab api "projects/$(_glab_project_id "$slug")" 2>/dev/null || echo "{}" ;;
                 issue-create)        glab issue create -R "$slug" -t "$1" -d "$2" 2>/dev/null ;;
