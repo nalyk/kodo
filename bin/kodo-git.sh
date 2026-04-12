@@ -41,7 +41,7 @@ _guard_write() {
 
 _gh_pr_list() {
     local slug="$1"
-    gh pr list --repo "$slug" --json number,title,state,headRefName,author,authorAssociation,labels,createdAt,updatedAt --limit 50
+    gh pr list --repo "$slug" --json number,title,state,headRefName,author,labels,createdAt,updatedAt --limit 50
 }
 
 _gh_pr_comment() {

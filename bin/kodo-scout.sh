@@ -186,6 +186,7 @@ main() {
 
     for toml in "$KODO_HOME/repos/"*.toml; do
         [[ "$(basename "$toml")" == "_template.toml" ]] && continue
+        [[ "$(basename "$toml")" == _*.toml ]] && continue
         [[ ! -f "$toml" ]] && continue
 
         local repo_id

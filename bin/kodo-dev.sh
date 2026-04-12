@@ -54,6 +54,13 @@ transition() {
     KODO_TRANSITION_OWNER_PID=$$ "$SCRIPT_DIR/kodo-transition.sh" "$EVENT_ID" "$1" "$2" "dev"
 }
 
+_branch_safe_event_id() {
+    local safe
+    safe=$(printf '%s' "$EVENT_ID" | sed -E 's/[^A-Za-z0-9._\/-]+/-/g; s#/{2,}#/#g; s#(^|/)\.+#\1#g; s#\.+(/|$)#\1#g; s#@\{#@-#g; s#\.lock(/|$)#-lock\1#g; s#^/+##; s#/+$##')
+    [[ -n "$safe" ]] || safe="$(date +%s)-$$"
+    echo "$safe"
+}
+
 # Get PR number: pipeline metadata first (issue-driven), then payload (PR-driven)
 _get_pr_num() {
     local num
@@ -418,7 +425,7 @@ do_generating() {
     # Step 2-3: Clone repo + setup branch
     # If kodo branch already exists (from a prior run), clone it to continue work.
     # Otherwise, clone default branch and create new kodo branch.
-    local branch_name="kodo/dev/${EVENT_ID}"
+    local branch_name="kodo/dev/$(_branch_safe_event_id)"
     local work_dir=""
 
     # Check if our branch already exists on remote
@@ -1254,7 +1261,7 @@ do_applying_suggestions() {
         pr_branch=$(get_payload | jq -r '.headRefName // empty' 2>/dev/null)
     fi
     if [[ -z "$pr_branch" ]]; then
-        pr_branch="kodo/dev/$EVENT_ID"
+        pr_branch="kodo/dev/$(_branch_safe_event_id)"
     fi
 
     # Clone and checkout the PR branch
