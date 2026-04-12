@@ -2,7 +2,7 @@
 # This file controls the self-improvement loop. Ships disabled.
 
 [autoevolve]
-enabled = false
+enabled = true
 paused_until = ""
 daily_trial_hour = 4
 monthly_budget_usd = 10

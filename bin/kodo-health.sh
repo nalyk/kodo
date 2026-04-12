@@ -180,16 +180,22 @@ _log_since() {
     [[ -f "$logfile" ]] || return 0
     tail -n "$LOG_WINDOW_LINES" "$logfile" 2>/dev/null | awk -v cutoff="[$cutoff" '
         {
+            if (substr($0,1,1) != "[") next
             if (substr($0,1,20) >= cutoff) print
         }
     '
+}
+
+_grep_count() {
+    local pattern="$1"
+    grep -cE "$pattern" 2>/dev/null || true
 }
 
 # --- Loop rate: "stuck after N re-dispatches" in last 60s ---
 loop_rate_per_min=0
 if [[ -f "$BRAIN_LOG" ]]; then
     loop_rate_per_min=$(_log_since "$BRAIN_LOG" "$ts_60s_ago" \
-        | grep -c "stuck after .* re-dispatches" 2>/dev/null || echo 0)
+        | _grep_count "stuck after .* re-dispatches")
     loop_rate_per_min="${loop_rate_per_min:-0}"
 fi
 
@@ -198,7 +204,7 @@ schema_drift_errors_1h=0
 for lg in "$BRAIN_LOG" "$DEV_LOG" "$MKT_LOG" "$PM_LOG"; do
     [[ -f "$lg" ]] || continue
     n=$(_log_since "$lg" "$ts_1h_ago" \
-        | grep -cE "no such (column|table)" 2>/dev/null || echo 0)
+        | _grep_count "no such (column|table)")
     schema_drift_errors_1h=$(( schema_drift_errors_1h + n ))
 done
 
@@ -207,7 +213,7 @@ db_lock_errors_1h=0
 for lg in "$BRAIN_LOG" "$DEV_LOG" "$MKT_LOG" "$PM_LOG"; do
     [[ -f "$lg" ]] || continue
     n=$(_log_since "$lg" "$ts_1h_ago" \
-        | grep -c "database is locked" 2>/dev/null || echo 0)
+        | _grep_count "database is locked")
     db_lock_errors_1h=$(( db_lock_errors_1h + n ))
 done
 
@@ -216,7 +222,7 @@ llm_failures_1h=0
 for lg in "$BRAIN_LOG" "$DEV_LOG" "$MKT_LOG" "$PM_LOG"; do
     [[ -f "$lg" ]] || continue
     n=$(_log_since "$lg" "$ts_1h_ago" \
-        | grep -cE "(claude|codex|gemini|qwen) (invocation failed|code gen failed)" 2>/dev/null || echo 0)
+        | _grep_count "(claude|codex|gemini|qwen) (invocation failed|code gen failed)")
     llm_failures_1h=$(( llm_failures_1h + n ))
 done
 
@@ -245,7 +251,7 @@ if [[ -f "$PM_LOG" ]]; then
     if [[ -n "$pm_window" ]]; then
         pm_log_lines_1h=$(printf '%s\n' "$pm_window" | wc -l | tr -d ' ')
         pm_violation_lines_1h=$(printf '%s\n' "$pm_window" \
-            | grep -cvE '^\[[0-9]{4}-' 2>/dev/null || echo 0)
+            | _grep_count '^[^[]|^\[[^0-9]|^\[[0-9]{0,3}[^0-9]')
     fi
 fi
 pm_log_lines_1h="${pm_log_lines_1h:-0}"
@@ -295,8 +301,8 @@ health_score=$(awk \
     -v lfr="$llm_failure_rate_1h" \
     -v dg="$deferred_growth_1h" \
     -v psv="$pm_schema_violation_rate" \
-    'BEGIN {
-        function clamp(x, lo, hi) { if (x<lo) return lo; if (x>hi) return hi; return x }
+    'function clamp(x, lo, hi) { if (x<lo) return lo; if (x>hi) return hi; return x }
+    BEGIN {
         p_stuck   = 0.25 * clamp(ser, 0, 1)
         p_loop    = 0.20 * clamp(lrpm/2.0, 0, 1)
         p_drift   = 0.15 * clamp(sde/3.0, 0, 1)
