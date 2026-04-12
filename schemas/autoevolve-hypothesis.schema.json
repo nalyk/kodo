@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "KODO Autoevolve Hypothesis",
+  "description": "Structured Phase A implementation plan consumed by kodo-autoevolve.sh before invoking the builder chain.",
+  "type": "object",
+  "required": [
+    "trial_id",
+    "hypothesis_source",
+    "rationale",
+    "target_files",
+    "target_functions",
+    "expected_factor_delta",
+    "predicted_capability_delta",
+    "diff_description",
+    "rollback_plan",
+    "risk_level"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "trial_id": {
+      "type": "string",
+      "description": "Stable autoevolve trial identifier, formatted by kodo-autoevolve.sh before the plan is implemented."
+    },
+    "hypothesis_source": {
+      "type": "string",
+      "enum": [
+        "miner_1_dead_code",
+        "miner_2_bottleneck",
+        "miner_3_failure_class",
+        "miner_4_cost",
+        "miner_5_ablation",
+        "claude"
+      ],
+      "description": "The deterministic miner or Claude fallback that produced this plan."
+    },
+    "rationale": {
+      "type": "string",
+      "description": "Plain-prose explanation of why this specific change should improve KODO capability."
+    },
+    "target_files": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Repository-relative files the builder is allowed to modify for this trial.",
+      "items": {
+        "type": "string",
+        "description": "A single repository-relative file path within the autoevolve mutable surface whitelist."
+      }
+    },
+    "target_functions": {
+      "type": "array",
+      "description": "Function names the builder is allowed to modify; each must carry a nearby # autoevolve:mutable marker.",
+      "items": {
+        "type": "string",
+        "description": "A shell function name marked with # autoevolve:mutable in one of the target files."
+      }
+    },
+    "expected_factor_delta": {
+      "type": "object",
+      "required": [
+        "f_automation",
+        "f_quality",
+        "f_autonomy",
+        "f_cost",
+        "f_speed"
+      ],
+      "additionalProperties": false,
+      "description": "Predicted directional change for each multiplicative capability factor.",
+      "properties": {
+        "f_automation": {
+          "type": "number",
+          "description": "Expected change to the automation factor."
+        },
+        "f_quality": {
+          "type": "number",
+          "description": "Expected change to the quality factor."
+        },
+        "f_autonomy": {
+          "type": "number",
+          "description": "Expected change to the autonomy factor."
+        },
+        "f_cost": {
+          "type": "number",
+          "description": "Expected change to the cost-efficiency factor."
+        },
+        "f_speed": {
+          "type": "number",
+          "description": "Expected change to the speed factor."
+        }
+      }
+    },
+    "predicted_capability_delta": {
+      "type": "number",
+      "description": "Predicted absolute change in capability_score from the proposed implementation."
+    },
+    "diff_description": {
+      "type": "string",
+      "description": "Concise description of the intended diff, including whether it removes or adds code."
+    },
+    "rollback_plan": {
+      "type": "string",
+      "description": "Exact rollback method if the trial regresses, usually git revert of the resulting PR."
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["low", "medium", "high"],
+      "description": "Estimated blast radius of the proposed change."
+    }
+  }
+}

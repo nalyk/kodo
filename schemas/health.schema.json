@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "KODO Health Score",
+  "description": "Single-line JSON emitted by kodo-health.sh. This is the immutable ground truth evaluator consumed by kodo-heartbeat.sh. Schema changes require a version bump and a HEARTBEAT.md update.",
+  "type": "object",
+  "required": ["version", "captured_at", "health_score", "trial_wallclock_s", "signals", "cohorts", "counts"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1",
+      "description": "Schema version. Increment only when signal weights or cohort formula change."
+    },
+    "captured_at": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp when kodo-health.sh started its read."
+    },
+    "trial_wallclock_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Wall-clock seconds kodo-health.sh spent collecting. Used by heartbeat to detect its own slowness."
+    },
+    "health_score": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Global scalar in [0,1]. Higher is better. Computed as 1.0 minus weighted penalties. See kodo-health.sh for the exact formula — weights are public and deterministic."
+    },
+    "signals": {
+      "type": "object",
+      "required": [
+        "stuck_events_ratio",
+        "loop_rate_per_min",
+        "schema_drift_errors_1h",
+        "db_lock_errors_1h",
+        "llm_failure_rate_1h",
+        "deferred_growth_1h",
+        "successful_resolutions_1h",
+        "pm_schema_violation_rate",
+        "merge_incident_rate_30d"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "stuck_events_ratio": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Fraction of in-flight pipeline_state rows whose updated_at is older than 10 minutes and whose state is not terminal. Catches the do_triaging no-op loop."
+        },
+        "loop_rate_per_min": {
+          "type": "number",
+          "minimum": 0.0,
+          "description": "Count of 'stuck after N re-dispatches' lines appearing in brain.log within the last 60 seconds. Catches the monitoring-loop pathology directly."
+        },
+        "schema_drift_errors_1h": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of 'no such column' / 'no such table' SQLite errors observed across all logs in the last hour."
+        },
+        "db_lock_errors_1h": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of 'database is locked' errors across all logs in the last hour."
+        },
+        "llm_failure_rate_1h": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Fraction of LLM invocations in the last hour that logged 'invocation failed'. Denominator is total invocations observed."
+        },
+        "deferred_growth_1h": {
+          "type": "integer",
+          "description": "Net change in (pipeline_state WHERE state='deferred') + deferred_queue row count, over the last hour. Positive means the backlog is growing."
+        },
+        "successful_resolutions_1h": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Events that reached resolved/published/reported in the last hour. Observed for cohort scoring, not rewarded in the global scalar."
+        },
+        "pm_schema_violation_rate": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Fraction of pm.log content in the last hour that matches free-text contamination patterns (bare URLs, missing JSON braces on schema-tagged invocations). Catches the PM raw-URL bug."
+        },
+        "merge_incident_rate_30d": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "From merge_outcome_stats_30d view. Slow signal — used for weekly ratchet, not per-trial decisions."
+        }
+      }
+    },
+    "cohorts": {
+      "type": "object",
+      "description": "Per-domain health scalars in [0,1]. Allow heartbeat to localize interventions to dev/mkt/pm independently.",
+      "required": ["dev", "mkt", "pm"],
+      "additionalProperties": false,
+      "properties": {
+        "dev": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "mkt": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "pm":  { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "description": "Raw tallies. Heartbeat logs these for post-hoc debugging but does not use them in the ratchet formula.",
+      "required": [
+        "pipeline_rows_total",
+        "pipeline_rows_stuck",
+        "pipeline_rows_terminal_1h",
+        "llm_invocations_1h",
+        "llm_failures_1h",
+        "pm_log_lines_1h",
+        "pm_violation_lines_1h"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "pipeline_rows_total":       { "type": "integer", "minimum": 0 },
+        "pipeline_rows_stuck":       { "type": "integer", "minimum": 0 },
+        "pipeline_rows_terminal_1h": { "type": "integer", "minimum": 0 },
+        "llm_invocations_1h":        { "type": "integer", "minimum": 0 },
+        "llm_failures_1h":           { "type": "integer", "minimum": 0 },
+        "pm_log_lines_1h":           { "type": "integer", "minimum": 0 },
+        "pm_violation_lines_1h":     { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
