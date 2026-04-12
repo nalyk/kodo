@@ -63,7 +63,7 @@ classify_event() {
             fi
             ;;
         PushEvent)
-            domains="dev"
+            domains=""
             ;;
         IssuesEvent)
             # Route by labels

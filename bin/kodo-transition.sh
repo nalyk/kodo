@@ -22,6 +22,7 @@ declare -A DEV_TRANSITIONS=(
     ["triaging:auto_merge"]=1
     ["triaging:hard_gates"]=1
     ["triaging:deferred"]=1
+    ["triaging:closed"]=1
     ["triaging:awaiting_intent"]=1
     ["awaiting_intent:generating"]=1
     ["awaiting_intent:deferred"]=1

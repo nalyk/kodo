@@ -94,6 +94,50 @@ defer() {
     kodo_log "DEV: deferred $EVENT_ID — $reason"
 }
 
+close_event() {
+    local reason="$1"
+    kodo_pipeline_set "$EVENT_ID" "dev" "closed_reason" "$reason" || true
+    transition "$(get_state)" "closed"
+    kodo_log "DEV: closed $EVENT_ID — $reason"
+}
+
+_find_open_issue_pr() {
+    local issue_num="$1"
+    [[ -n "$issue_num" && "$issue_num" != "?" && "$issue_num" != "null" ]] || return 1
+
+    local rows
+    rows=$(kodo_sql "SELECT event_id,
+            json_extract(metadata_json, '\$.pr_number'),
+            COALESCE(json_extract(metadata_json, '\$.pr_url'), ''),
+            COALESCE(json_extract(metadata_json, '\$.pr_branch'), '')
+        FROM pipeline_state
+        WHERE repo = '$(kodo_sql_escape "$REPO_ID")'
+          AND domain = 'dev'
+          AND event_id != '$(kodo_sql_escape "$EVENT_ID")'
+          AND state NOT IN ('closed', 'resolved')
+          AND json_valid(payload_json) = 1
+          AND CAST(json_extract(payload_json, '\$.number') AS TEXT) = '$(kodo_sql_escape "$issue_num")'
+          AND COALESCE(json_extract(metadata_json, '\$.pr_number'), '') NOT IN ('', 'null')
+        ORDER BY updated_at DESC
+        LIMIT 5;")
+
+    local row other_event pr_num pr_url pr_branch pr_state
+    while IFS='|' read -r other_event pr_num pr_url pr_branch; do
+        [[ -n "$other_event" && -n "$pr_num" && "$pr_num" != "null" ]] || continue
+        pr_state=$("$SCRIPT_DIR/kodo-git.sh" pr-checks "$REPO_TOML" "$pr_num" 2>/dev/null \
+            | jq -r '.pr_state // "UNKNOWN"' 2>/dev/null) || pr_state="UNKNOWN"
+        if [[ "$pr_state" == "UNKNOWN" ]]; then
+            pr_state=$(gh pr view "$pr_num" --repo "$REPO_SLUG" --json state --jq '.state' 2>/dev/null) || pr_state="UNKNOWN"
+        fi
+        if [[ "$pr_state" == "OPEN" ]]; then
+            printf '%s|%s|%s|%s\n' "$other_event" "$pr_num" "$pr_url" "$pr_branch"
+            return 0
+        fi
+    done <<< "$rows"
+
+    return 1
+}
+
 # ── Claude Availability Check ────────────────────────────────
 
 _claude_available() {
@@ -174,6 +218,11 @@ _triage_issue() {
     local issue_num
     issue_num=$(echo "$payload" | jq -r '.number // "?"' 2>/dev/null)
 
+    if [[ -z "$issue_num" || "$issue_num" == "?" || "$issue_num" == "null" ]]; then
+        close_event "non-issue event — no issue number in payload"
+        return
+    fi
+
     # Documentation issues → no code action, defer with explanation
     if [[ "$labels" == *"documentation"* || "$labels" == *"docs"* ]]; then
         kodo_log "DEV: issue #$issue_num — documentation, not actionable by dev engine"
@@ -213,6 +262,19 @@ _triage_issue() {
             kodo_pipeline_set "$EVENT_ID" "dev" "architect_cli" ""
             kodo_pipeline_set "$EVENT_ID" "dev" "work_dir" ""
         fi
+    fi
+
+    local linked_pr
+    linked_pr=$(_find_open_issue_pr "$issue_num") || linked_pr=""
+    if [[ -n "$linked_pr" ]]; then
+        local linked_event linked_num linked_url linked_branch
+        IFS='|' read -r linked_event linked_num linked_url linked_branch <<< "$linked_pr"
+        kodo_pipeline_set "$EVENT_ID" "dev" "pr_number" "$linked_num"
+        [[ -n "$linked_url" ]] && kodo_pipeline_set "$EVENT_ID" "dev" "pr_url" "$linked_url"
+        [[ -n "$linked_branch" ]] && kodo_pipeline_set "$EVENT_ID" "dev" "pr_branch" "$linked_branch"
+        kodo_pipeline_set "$EVENT_ID" "dev" "duplicate_of_event" "$linked_event"
+        close_event "duplicate issue event — tracked by PR #$linked_num"
+        return
     fi
 
     # Intent gate: require maintainer approval before generating code
