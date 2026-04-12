@@ -1,9 +1,12 @@
-# KODO v4 — Exactly 4 cron entries. Do NOT add more.
+# KODO v4 cron entries.
 # PATH must include ~/.local/bin for claude, codex, gemini, qwen CLIs
 PATH=/home/ubuntu/.local/bin:/home/ubuntu/.npm-global/bin:/home/ubuntu/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
 KODO_HOME=/home/ubuntu/.kodo
 
 */2 * * * * ~/.kodo/bin/kodo-scout.sh >> ~/.kodo/logs/scout.log 2>&1
 *   * * * * ~/.kodo/bin/kodo-brain.sh >> ~/.kodo/logs/brain.log 2>&1
+*/5 * * * * ~/.kodo/bin/kodo-heartbeat.sh >> ~/.kodo/logs/heartbeat.log 2>&1
 0  10 * * * ~/.kodo/bin/kodo-pm.sh --daily-triage >> ~/.kodo/logs/pm.log 2>&1
+0   4 * * * ~/.kodo/bin/kodo-autoevolve.sh >> ~/.kodo/logs/autoevolve.log 2>&1
+0   4 * * 0 ~/.kodo/bin/kodo-autoevolve-calibrate.sh >> ~/.kodo/logs/autoevolve-calibrate.log 2>&1
 0   9 * * 1 ~/.kodo/bin/kodo-weekly.sh >> ~/.kodo/logs/weekly.log 2>&1
